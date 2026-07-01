@@ -1,0 +1,6 @@
+[server]
+maxUploadSize = 50
+
+[theme]
+base = "light"
+font = "sans serif"

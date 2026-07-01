@@ -1,0 +1,797 @@
+"""
+Builds the PMI Closeout Report by modifying the original template directly.
+Preserves all original formatting, fonts, tables, branding, header/footer.
+"""
+
+import io
+import os
+import json
+import re
+import zipfile
+from pathlib import Path
+from copy import deepcopy
+
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+TEMPLATE_PATH = Path(__file__).parent.parent / "TN20133-A PMI Closeout Report .docx"
+
+TOWER_TYPE_DISPLAY = {
+    "Self Support": "Self Support Tower",
+    "Guyed":        "Guyed Tower",
+    "Monopole":     "Monopole",
+}
+
+# Field observation section names per tower type (exported for use in app.py)
+OBS_SECTIONS_BY_TOWER = {
+    "Self Support": [
+        "Structural Member Verification",
+        "Connection and Installation Verification",
+        "Modification Installation",
+        "Connection and Welding",
+        "Alignment and Eccentricity",
+        "Coating and Protection",
+        "Interference Check",
+        "Final Verification",
+    ],
+    "Guyed": [
+        "Structural Member Verification",
+        "Connection and Installation Verification",
+        "Modification Installation",
+        "Alignment and Eccentricity",
+        "Interference Check",
+        "Guy Wire Verification",
+        "Final Verification",
+    ],
+    "Monopole": [
+        "Structural Member Verification",
+        "Connection and Installation Verification",
+        "Modification Installation",
+        "Connection and Welding",
+        "Alignment and Eccentricity",
+        "Coating and Protection",
+        "Interference Check",
+        "Final Verification",
+    ],
+}
+
+# Photo Documentation table — special section labels per tower type
+_PHOTO_TABLE_SPECIALS = {
+    "Self Support": [
+        "Overall Tower Views – Completed Modifications",
+        "Field Measurements and Verification of Installed Structural Members",
+    ],
+    "Guyed": [
+        "Tension Gauge Photographs – Guy Wire Anchor Points",
+        "Overall Tower Views – Completed Modifications",
+    ],
+    "Monopole": [
+        "Overall Tower Views – Completed Modifications",
+        "Field Measurements and Verification of Installed Structural Members",
+    ],
+}
+
+
+# ─── SMART TEXT REPLACEMENT ──────────────────────────────────────────────────
+
+def _smart_replace_in_para(para, old: str, new: str) -> bool:
+    for run in para.runs:
+        if old in run.text:
+            run.text = run.text.replace(old, new)
+            return True
+
+    full = "".join(r.text for r in para.runs)
+    if old not in full:
+        return False
+
+    start = full.index(old)
+    end   = start + len(old)
+    pos = 0
+    start_run_idx = start_off = None
+    end_run_idx   = end_off   = None
+
+    for i, run in enumerate(para.runs):
+        run_end = pos + len(run.text)
+        if start_run_idx is None and start < run_end:
+            start_run_idx, start_off = i, start - pos
+        if end_run_idx is None and end <= run_end:
+            end_run_idx, end_off = i, end - pos
+            break
+        pos = run_end
+
+    if start_run_idx is None or end_run_idx is None:
+        return False
+
+    runs = para.runs
+    if start_run_idx == end_run_idx:
+        r = runs[start_run_idx]
+        r.text = r.text[:start_off] + new + r.text[end_off:]
+    else:
+        runs[start_run_idx].text = runs[start_run_idx].text[:start_off] + new
+        for i in range(start_run_idx + 1, end_run_idx):
+            runs[i].text = ""
+        runs[end_run_idx].text = runs[end_run_idx].text[end_off:]
+
+    return True
+
+
+def _apply_replacements(doc, replacements: dict):
+    for para in doc.paragraphs:
+        for old, new in replacements.items():
+            _smart_replace_in_para(para, old, new)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    for old, new in replacements.items():
+                        _smart_replace_in_para(para, old, new)
+
+
+# ─── TABLE HELPERS ───────────────────────────────────────────────────────────
+
+def _find_table_by_header(doc, *header_texts):
+    for table in doc.tables:
+        row0 = " ".join(c.text for c in table.rows[0].cells)
+        if all(h in row0 for h in header_texts):
+            return table
+    return None
+
+
+def _set_cell_text(cell, text: str):
+    for para in cell.paragraphs:
+        for run in para.runs:
+            run.text = ""
+    para = cell.paragraphs[0]
+    if para.runs:
+        para.runs[0].text = text
+    else:
+        para.add_run(text)
+
+
+def _rebuild_table(doc, header_texts: tuple, new_rows: list):
+    table = _find_table_by_header(doc, *header_texts)
+    if table is None:
+        return
+    template_tr = deepcopy(table.rows[1]._tr) if len(table.rows) > 1 else None
+    for row in table.rows[1:]:
+        table._tbl.remove(row._tr)
+    for row_values in new_rows:
+        if template_tr is not None:
+            new_tr = deepcopy(template_tr)
+            table._tbl.append(new_tr)
+            new_row = table.rows[-1]
+            for i, val in enumerate(row_values):
+                if i < len(new_row.cells):
+                    _set_cell_text(new_row.cells[i], str(val))
+        else:
+            new_row_cells = table.add_row().cells
+            for i, val in enumerate(row_values):
+                if i < len(new_row_cells):
+                    new_row_cells[i].text = str(val)
+
+
+# ─── COVER PAGE ADDRESS ───────────────────────────────────────────────────────
+
+def _replace_para_value_after_label(para, label: str, new_value: str) -> bool:
+    full = "".join(r.text for r in para.runs)
+    if label not in full:
+        return False
+    colon_end = full.index(label) + len(label)
+    spaces_end = colon_end
+    while spaces_end < len(full) and full[spaces_end] == " ":
+        spaces_end += 1
+    label_with_spaces = full[:spaces_end]
+    new_full = label_with_spaces + new_value
+    runs = para.runs
+    if runs:
+        runs[0].text = new_full
+        for r in runs[1:]:
+            r.text = ""
+    return True
+
+
+def _replace_cover_address(doc, site_address: str, gps: str):
+    paras = list(doc.paragraphs)
+    addr_idx = None
+    for i, para in enumerate(paras):
+        if "Site Address:" in para.text:
+            addr_idx = i
+            break
+    if addr_idx is None:
+        return
+
+    address_lines = [l for l in site_address.split("\n") if l.strip()]
+    _replace_para_value_after_label(paras[addr_idx], "Site Address:", address_lines[0] if address_lines else "")
+
+    for offset, line in enumerate([
+        address_lines[1] if len(address_lines) > 1 else "",
+        gps or ""
+    ], start=1):
+        if addr_idx + offset < len(paras):
+            p = paras[addr_idx + offset]
+            full = "".join(r.text for r in p.runs)
+            if full.startswith("   "):
+                stripped = full.lstrip(" ")
+                indent = full[: len(full) - len(stripped)]
+                new_full = indent + line
+                if p.runs:
+                    p.runs[0].text = new_full
+                    for r in p.runs[1:]:
+                        r.text = ""
+
+
+# ─── SCOPE BULLETS ───────────────────────────────────────────────────────────
+
+def _replace_scope_bullets(doc, modifications: list):
+    body = doc.element.body
+    body_paras = [c for c in body if c.tag == qn("w:p")]
+    start_idx = end_idx = None
+    template_bullet = None
+
+    for i, p in enumerate(body_paras):
+        text = "".join(t.text or "" for t in p.iter(qn("w:t")))
+        if "consisted of the following items" in text:
+            start_idx = i
+        elif start_idx is not None and template_bullet is None:
+            template_bullet = deepcopy(p)
+        elif "Based on our field observation" in text and start_idx is not None:
+            end_idx = i
+            break
+
+    if start_idx is None or end_idx is None or template_bullet is None:
+        return
+
+    for p in body_paras[start_idx + 1: end_idx]:
+        p.getparent().remove(p)
+
+    anchor = body_paras[start_idx]
+    for mod in reversed(modifications):
+        new_p = deepcopy(template_bullet)
+        for t in new_p.iter(qn("w:t")):
+            t.text = ""
+        t_list = list(new_p.iter(qn("w:t")))
+        if t_list:
+            t_list[0].text = mod["description"]
+        anchor.addnext(new_p)
+
+
+# ─── DEFICIENCIES ─────────────────────────────────────────────────────────────
+
+def _set_deficiencies(doc, deficiencies_text: str, no_deficiencies: bool):
+    if no_deficiencies or not deficiencies_text.strip():
+        return
+    body = doc.element.body
+    for p in body:
+        if p.tag != qn("w:p"):
+            continue
+        text = "".join(t.text or "" for t in p.iter(qn("w:t")))
+        if "No visible deficiencies were observed" in text:
+            for t in p.iter(qn("w:t")):
+                t.text = ""
+            t_list = list(p.iter(qn("w:t")))
+            if t_list:
+                t_list[0].text = deficiencies_text
+            break
+
+
+# ─── FIELD OBSERVATIONS ──────────────────────────────────────────────────────
+
+def generate_field_observations(modifications: list, tower_type: str = "Self Support") -> dict:
+    """
+    Call Gemini to generate 2 observation bullets per section.
+    Exported for use in app.py (Step 5 preview).
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key or not modifications:
+        return {}
+
+    sections = OBS_SECTIONS_BY_TOWER.get(tower_type, OBS_SECTIONS_BY_TOWER["Self Support"])
+    mod_text = "\n".join(
+        f"- {m['mod_id']}: {m['description']} at elevation {m['elevation']}"
+        for m in modifications
+    )
+
+    sections_template = "{" + ",\n  ".join(f'"{s}": ["point 1", "point 2"]' for s in sections) + "}"
+
+    if tower_type == "Guyed":
+        context = (
+            "This is a guyed tower PMI closeout and inspection report. "
+            "The tower uses guy wires, anchors, and a central mast. "
+            "Reference guy system hardware, anchor conditions, and foundations where relevant."
+        )
+    else:
+        context = "This is a self-support lattice tower PMI closeout report."
+
+    prompt = f"""You are writing the Field Observation Details section for a structural engineering PMI closeout report.
+
+{context}
+
+Modifications performed on this tower:
+{mod_text}
+
+For each section below, write EXACTLY 2 concise bullet points. Use passive voice, professional structural engineering language. Reference actual member types, elevations, or modification IDs where appropriate. Do NOT write generic statements.
+
+Return ONLY valid JSON (no markdown fences, no explanation):
+{sections_template}"""
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        text = response.text.strip()
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+def _set_para_text(p, text: str):
+    for t in p.iter(qn("w:t")):
+        t.text = ""
+    t_list = list(p.iter(qn("w:t")))
+    if t_list:
+        t_list[0].text = text
+
+
+def _replace_field_observations(doc, observations: dict):
+    if not observations:
+        return
+
+    body = doc.element.body
+    body_paras = [c for c in body if c.tag == qn("w:p")]
+
+    fod_idx = obs_def_idx = None
+    heading_tmpl = bullet_tmpl = None
+
+    for i, p in enumerate(body_paras):
+        text = "".join(t.text or "" for t in p.iter(qn("w:t")))
+        if "Field Observation Details" in text and fod_idx is None:
+            fod_idx = i
+        elif fod_idx is not None:
+            if "Structural Member Verification" in text and heading_tmpl is None:
+                heading_tmpl = deepcopy(p)
+            elif heading_tmpl is not None and bullet_tmpl is None:
+                stripped = text.strip()
+                if stripped:
+                    bullet_tmpl = deepcopy(p)
+            if "Observed Deficiencies" in text:
+                obs_def_idx = i
+                break
+
+    if fod_idx is None or obs_def_idx is None or heading_tmpl is None:
+        return
+
+    if bullet_tmpl is None:
+        bullet_tmpl = deepcopy(heading_tmpl)
+
+    fod_para = body_paras[fod_idx]
+
+    for p in body_paras[fod_idx + 1: obs_def_idx]:
+        p.getparent().remove(p)
+
+    all_paras = []
+
+    intro = deepcopy(bullet_tmpl)
+    _set_para_text(intro, "The following observations were made during the site visit in accordance with the approved modification drawings.")
+    all_paras.append(intro)
+
+    for section, bullets in observations.items():
+        hp = deepcopy(heading_tmpl)
+        _set_para_text(hp, section + ":")
+        all_paras.append(hp)
+        for bullet_text in bullets:
+            bp = deepcopy(bullet_tmpl)
+            _set_para_text(bp, bullet_text)
+            all_paras.append(bp)
+
+    for p in reversed(all_paras):
+        fod_para.addnext(p)
+
+
+# ─── TRUNCATE ─────────────────────────────────────────────────────────────────
+
+def _truncate_after(doc, marker_text: str):
+    body = doc.element.body
+    found = False
+    to_remove = []
+
+    for child in list(body):
+        if child.tag == qn("w:sectPr"):
+            continue
+        if found:
+            to_remove.append(child)
+        elif child.tag == qn("w:p"):
+            text = "".join(t.text or "" for t in child.iter(qn("w:t"))).strip()
+            if text in (marker_text, marker_text + ":"):
+                found = True
+
+    for elem in to_remove:
+        body.remove(elem)
+
+
+# ─── PDF TO IMAGES ────────────────────────────────────────────────────────────
+
+def _pdf_to_images(pdf_bytes: bytes) -> list:
+    try:
+        import fitz
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        images = []
+        for page in pdf_doc:
+            mat = fitz.Matrix(2.0, 2.0)
+            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+            images.append(pix.tobytes("png"))
+        pdf_doc.close()
+        return images
+    except Exception:
+        return []
+
+
+# ─── PHOTO SIZE CONSTRAINT ────────────────────────────────────────────────────
+
+def _constrained_picture_dims(img_bytes: bytes, max_w: float = 2.9, max_h: float = 2.6) -> tuple:
+    """
+    Returns (width_inches, height_inches) that fits the image within max_w × max_h
+    while preserving aspect ratio. Constrains portrait images by height so that
+    two rows of photos always fit on a standard page.
+    """
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(io.BytesIO(img_bytes))
+        w, h = img.size
+        if w == 0 or h == 0:
+            return max_w, max_h
+        aspect = w / h
+        box_aspect = max_w / max_h
+        if aspect >= box_aspect:
+            return max_w, round(max_w / aspect, 4)
+        else:
+            return round(aspect * max_h, 4), max_h
+    except Exception:
+        return max_w, max_h
+
+
+# ─── ADD CONTENT HELPERS ──────────────────────────────────────────────────────
+
+def _add_section_heading(doc, text: str):
+    para = doc.add_paragraph()
+    run = para.add_run(text)
+    run.bold = True
+    run.font.size = Pt(12)
+    return para
+
+
+def _add_photo_group_heading(doc, text: str):
+    para = doc.add_paragraph()
+    run = para.add_run(text)
+    run.bold = True
+    run.font.size = Pt(11)
+    return para
+
+
+def _clear_cell_borders(cell):
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcBorders = OxmlElement("w:tcBorders")
+    for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{side}")
+        el.set(qn("w:val"), "none")
+        el.set(qn("w:sz"), "0")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "auto")
+        tcBorders.append(el)
+    tcPr.append(tcBorders)
+
+
+def _add_photo_table(doc, photos: list):
+    """
+    Add photos in a 2-column borderless table, 2 per row (4 per page).
+    Each photo is size-constrained so portrait and landscape both fit within
+    a 2.9" × 2.6" box, guaranteeing two rows per page.
+    """
+    if not photos:
+        return
+
+    n_rows = (len(photos) + 1) // 2
+    table = doc.add_table(rows=n_rows, cols=2)
+
+    for row in table.rows:
+        for cell in row.cells:
+            _clear_cell_borders(cell)
+
+    for i, (img_bytes, caption, _) in enumerate(photos):
+        row_idx = i // 2
+        col_idx = i % 2
+        cell = table.rows[row_idx].cells[col_idx]
+
+        img_para = cell.paragraphs[0]
+        img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        try:
+            w_in, h_in = _constrained_picture_dims(img_bytes)
+            img_para.add_run().add_picture(
+                io.BytesIO(img_bytes),
+                width=Inches(w_in),
+                height=Inches(h_in),
+            )
+        except Exception:
+            img_para.add_run("[Image could not be inserted]")
+
+        cap_para = cell.add_paragraph()
+        cap_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = cap_para.add_run(caption)
+        r.italic = True
+        r.font.size = Pt(9)
+
+    if len(photos) % 2 == 1:
+        last_row = table.rows[-1]
+        empty_cell = last_row.cells[1]
+        for p in empty_cell.paragraphs:
+            for run in p.runs:
+                run.text = ""
+
+    doc.add_paragraph()
+
+
+def _add_file(doc, file_bytes: bytes, filename: str, mime_type: str):
+    if mime_type in ("image/jpeg", "image/png"):
+        try:
+            run = doc.add_paragraph().add_run()
+            run.add_picture(io.BytesIO(file_bytes), width=Inches(6.0))
+        except Exception:
+            doc.add_paragraph(f"[Could not insert: {filename}]")
+        doc.add_paragraph()
+
+    elif mime_type == "application/pdf":
+        images = _pdf_to_images(file_bytes)
+        if images:
+            for img_bytes in images:
+                try:
+                    run = doc.add_paragraph().add_run()
+                    run.add_picture(io.BytesIO(img_bytes), width=Inches(6.0))
+                except Exception:
+                    doc.add_paragraph(f"[PDF page could not be inserted: {filename}]")
+                doc.add_paragraph()
+        else:
+            doc.add_paragraph(f"[PDF attached: {filename} — could not render]")
+            doc.add_paragraph()
+    else:
+        p = doc.add_paragraph(f"[Attached: {filename}]")
+        p.runs[0].italic = True
+        doc.add_paragraph()
+
+
+def _get_positions(tower_type: str, num_guys: int = 3) -> list:
+    if tower_type == "Self Support":
+        return ["Leg A", "Leg B", "Leg C"]
+    elif tower_type == "Guyed":
+        return [f"Guy {i+1}" for i in range(num_guys)]
+    return []
+
+
+# ─── ORPHANED IMAGE CLEANUP ──────────────────────────────────────────────────
+
+def _strip_orphaned_images(docx_bytes: bytes) -> bytes:
+    try:
+        with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zin:
+            doc_xml = zin.read("word/document.xml").decode("utf-8")
+            referenced_rids = set(re.findall(r'r:embed="(rId\d+)"', doc_xml))
+
+            rels_xml = zin.read("word/_rels/document.xml.rels").decode("utf-8")
+            img_type = "relationships/image"
+            all_img_rels = {}
+            for m in re.finditer(
+                r'<Relationship[^>]+Id="(rId\d+)"[^>]+Type="[^"]*' + img_type + r'"[^>]+Target="([^"]+)"',
+                rels_xml,
+            ):
+                all_img_rels[m.group(1)] = m.group(2)
+
+            orphan_targets = {v for k, v in all_img_rels.items() if k not in referenced_rids}
+            orphan_rids    = {k for k, v in all_img_rels.items() if k not in referenced_rids}
+
+            if not orphan_targets:
+                return docx_bytes
+
+            orphan_paths = {f"word/{t}" for t in orphan_targets}
+
+            out = io.BytesIO()
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    if item.filename in orphan_paths:
+                        continue
+                    data = zin.read(item.filename)
+                    if item.filename == "word/_rels/document.xml.rels":
+                        for rid in orphan_rids:
+                            data = re.sub(
+                                rb'<Relationship[^>]*Id="' + rid.encode() + rb'"[^>]*/?>',
+                                b"",
+                                data,
+                            )
+                    zout.writestr(item, data)
+
+            return out.getvalue()
+    except Exception:
+        return docx_bytes
+
+
+# ─── MAIN BUILD FUNCTION ─────────────────────────────────────────────────────
+
+def build_report(data: dict) -> bytes:
+    doc = Document(TEMPLATE_PATH)
+
+    info           = data["info"]
+    modifications  = data.get("modifications", [])
+    tower_type     = data.get("tower_type", "Self Support")
+    num_guys       = data.get("num_guys", 3)
+    photos         = data.get("photos", {})
+    special_photos = data.get("special_photos", {})
+    documents      = data.get("documents", {})
+    certificates   = data.get("certificates", [])
+    deficiencies   = data.get("deficiencies", "")
+    no_deficiencies = data.get("no_deficiencies", True)
+
+    tower_display = TOWER_TYPE_DISPLAY.get(tower_type, tower_type)
+
+    # ── 1. Text replacements ─────────────────────────────────────────────────
+    replacements = {
+        "June 9, 2026":                  info.get("report_date", ""),
+        "SBA Communication Corporation": info.get("client", ""),
+        "Hillvale, TN Tower":            info.get("site_name", ""),
+        "AT&T":                          info.get("carrier_name", ""),
+        "Self Support Tower":            tower_display,
+        "300’":                     info.get("tower_height", ""),
+        "300'":                          info.get("tower_height", ""),
+        "08/06/2026":                    info.get("observation_date", ""),
+        "01/08/2026":                    info.get("drawing_date", ""),
+        "S-02, S-03":                    info.get("drawing_sheets", ""),
+        "Vinco, Inc":                    info.get("general_contractor", ""),
+    }
+
+    client_first = info.get("client", "").split()[0] if info.get("client") else "Client"
+    replacements["Dear SBA Team"] = f"Dear {client_first} Team"
+
+    old_desc = (
+        "Post modification structural reinforcement and verification of "
+        "tower components as per approved design drawings."
+    )
+    new_desc = info.get("project_description", old_desc)
+    if new_desc != old_desc:
+        replacements[old_desc] = new_desc
+
+    _apply_replacements(doc, replacements)
+    _apply_replacements(doc, {"TN20133-A": info.get("site_number", "")})
+
+    # ── 2. Cover page address ────────────────────────────────────────────────
+    _replace_cover_address(doc, info.get("site_address", ""), info.get("gps_coords", ""))
+
+    # ── 3. Scope bullets ─────────────────────────────────────────────────────
+    _replace_scope_bullets(doc, modifications)
+
+    # ── 4. Modification Summary table ────────────────────────────────────────
+    _rebuild_table(
+        doc,
+        ("Modification ID", "Description", "Elevation"),
+        [[m["mod_id"], m["description"], m["elevation"]] for m in modifications],
+    )
+
+    # ── 5. Design Documentation table ────────────────────────────────────────
+    site_no   = info.get("site_number", "")
+    draw_date = info.get("drawing_date", "")
+    _rebuild_table(
+        doc,
+        ("Document(s)", "Remarks", "Source"),
+        [["Tower Modification Drawings",
+          f"ATSS, Project#:{site_no} Dated {draw_date}",
+          "Advanced Tower Structural Solutions"]],
+    )
+
+    # ── 6. Photo Documentation table ─────────────────────────────────────────
+    positions = _get_positions(tower_type, num_guys)
+    photo_rows = []
+    counter = 1
+    for mod in modifications:
+        mid   = mod["mod_id"]
+        elev  = mod["elevation"]
+        short = mod["description"][:55] + ("..." if len(mod["description"]) > 55 else "")
+        if positions:
+            for pos in positions:
+                photo_rows.append([str(counter), f"{mid} ({elev}) – {pos} – {short}", ""])
+                counter += 1
+        else:
+            photo_rows.append([str(counter), f"{mid} ({elev}) – {short}", ""])
+            counter += 1
+
+    for label in _PHOTO_TABLE_SPECIALS.get(tower_type, _PHOTO_TABLE_SPECIALS["Self Support"]):
+        photo_rows.append([str(counter), label, ""])
+        counter += 1
+
+    _rebuild_table(doc, ("Photo No.", "Description"), photo_rows)
+
+    # ── 7. Deficiencies ──────────────────────────────────────────────────────
+    _set_deficiencies(doc, deficiencies, no_deficiencies)
+
+    # ── 8. Field observations ────────────────────────────────────────────────
+    field_obs = data.get("field_observations") or {}
+    if not field_obs:
+        field_obs = generate_field_observations(modifications, tower_type)
+    if field_obs:
+        _replace_field_observations(doc, field_obs)
+
+    # ── 9. Truncate after photo heading ──────────────────────────────────────
+    _truncate_after(doc, "On-Site Inspection Photographs")
+
+    # ── 10. Modification photo sections ──────────────────────────────────────
+    for mod in modifications:
+        mid  = mod["mod_id"]
+        elev = mod["elevation"]
+        if positions:
+            for pos in positions:
+                photo_list = photos.get((mid, pos), [])
+                if photo_list:
+                    _add_photo_group_heading(doc, f"{mid} ({elev}) – {pos}:")
+                    _add_photo_table(doc, photo_list)
+        else:
+            photo_list = photos.get((mid, ""), [])
+            if photo_list:
+                _add_photo_group_heading(doc, f"{mid} ({elev}):")
+                _add_photo_table(doc, photo_list)
+
+    # ── 11. Special photo sections ────────────────────────────────────────────
+    for label, photo_list in special_photos.items():
+        if photo_list:
+            _add_photo_group_heading(doc, f"{label}:")
+            _add_photo_table(doc, photo_list)
+
+    # ── 12. Supporting documents ──────────────────────────────────────────────
+    if tower_type == "Guyed":
+        doc_sections = [
+            ("as_built_drawings",     "As-Built Drawings (EOR)"),
+            ("material_cert",         "Material Certification Report"),
+            ("packing_slips",         "Packing Slips"),
+            ("tension_report",        "Tension Report"),
+            ("plumb_twist_report",    "Plumb & Twist Report"),
+            ("fabrication_submittal", "Fabrication Submittal Package"),
+            ("cold_galv_letter",      "Cold Galvanization Letter"),
+        ]
+    else:
+        doc_sections = [
+            ("as_built_drawings",     "As-Built Drawings (EOR)"),
+            ("material_cert",         "Material Certification Report"),
+            ("fabrication_submittal", "Fabrication Submittal Package"),
+            ("fabrication_letter",    "Fabrication Letter"),
+            ("cold_galv_letter",      "Cold Galvanization Letter"),
+        ]
+
+    for doc_key, section_title in doc_sections:
+        doc.add_page_break()
+        _add_section_heading(doc, f"{section_title}:")
+        file_list = documents.get(doc_key, [])
+        if file_list:
+            for fb, fname, mime in file_list:
+                _add_file(doc, fb, fname, mime)
+        else:
+            doc.add_paragraph("[Not provided]")
+
+    # ── 13. Certificates ─────────────────────────────────────────────────────
+    doc.add_page_break()
+    _add_section_heading(doc, "Certificates:")
+    if certificates:
+        for fb, fname, mime in certificates:
+            _add_file(doc, fb, fname, mime)
+    else:
+        doc.add_paragraph("[Not provided]")
+
+    # ── 14. Limitations ──────────────────────────────────────────────────────
+    doc.add_page_break()
+    _add_section_heading(doc, "Limitations:")
+    doc.add_paragraph(
+        "This report is based on a visual only inspection conducted at the time of the site visit. "
+        "Observations are limited to visible and accessible components only. "
+        "No destructive testing or detailed structural analysis was performed."
+    )
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return _strip_orphaned_images(buf.getvalue())
