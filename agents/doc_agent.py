@@ -10,7 +10,7 @@ from docx import Document
 
 load_dotenv()
 
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.5-flash"
 
 DOC_EXTRACTION_PROMPTS = {
     "material_cert": """Extract the following fields from this Material Certification Report and return as JSON:
