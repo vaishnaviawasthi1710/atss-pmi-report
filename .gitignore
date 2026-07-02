@@ -25,3 +25,10 @@ Thumbs.db
 # Temp / test output
 *.docx_output
 tests/output/
+tests/TEST_OUTPUT_*.docx
+tests/TEST_OUTPUT_*.pdf
+docx_extract/
+
+# Large reference files — not needed to run the app
+*.pdf
+Screenshot*.png

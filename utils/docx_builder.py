@@ -283,6 +283,11 @@ def generate_field_observations(modifications: list, tower_type: str = "Self Sup
     """
     Call Gemini to generate 2 observation bullets per section.
     Exported for use in app.py (Step 5 preview).
+
+    Raises on API failure (quota/billing/network/etc.) instead of swallowing
+    the error, so callers — especially the interactive "Generate AI
+    Observations" button in app.py — can show the user what actually went
+    wrong instead of silently rendering blank text areas.
     """
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key or not modifications:
@@ -317,16 +322,13 @@ For each section below, write EXACTLY 2 concise bullet points. Use passive voice
 Return ONLY valid JSON (no markdown fences, no explanation):
 {sections_template}"""
 
-    try:
-        from google import genai
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        text = response.text.strip()
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        return json.loads(text)
-    except Exception:
-        return {}
+    from google import genai
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+    text = response.text.strip()
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
 
 
 def _set_para_text(p, text: str):
@@ -413,6 +415,57 @@ def _truncate_after(doc, marker_text: str):
         body.remove(elem)
 
 
+# ─── HEADING STYLE TEMPLATE (for appended sections) ──────────────────────────
+
+def _get_heading_pPr_template(doc, marker_text: str):
+    """
+    Deep-copies the <w:pPr> (style + auto-number list) of a real "Heading 1"
+    paragraph in the template — e.g. "On-Site Inspection Photographs:" — so
+    sections we append later (extra documents, custom certificates) can reuse
+    the exact same numbered-heading formatting and continue the template's
+    Word list numbering. Without this, appended sections render as plain bold
+    text instead of real headings, and the document's Table of Contents field
+    (which tracks Heading-1..3 styles) never picks them up.
+    """
+    for p in doc.paragraphs:
+        if p.text.strip() in (marker_text, marker_text + ":") and p.style.name == "Heading 1":
+            pPr = p._p.find(qn("w:pPr"))
+            return deepcopy(pPr) if pPr is not None else None
+    return None
+
+
+# ─── BLANK PARAGRAPH CLEANUP ──────────────────────────────────────────────────
+
+def _collapse_excess_blank_paragraphs(doc, max_blanks: int = 1):
+    """
+    The master template has hand-typed blank paragraphs (a handful up to 16 in
+    a row) used as manual spacing before some section headings, sized for the
+    template's original (long) sample content. When our dynamically generated
+    content is shorter, those blank paragraphs land stacked at the top of a
+    page instead of acting as a small visual gap, producing a near-empty page
+    before headings like "Observed Deficiencies:". This trims any run of more
+    than `max_blanks` consecutive empty paragraphs immediately before a
+    Heading 1/2 paragraph, anywhere in the document.
+    """
+    paras = doc.paragraphs
+
+    for i, p in enumerate(paras):
+        if p.style.name not in ("Heading 1", "Heading 2") or not p.text.strip():
+            continue
+        # Walk backward over ANY blank paragraph — including empty leftover
+        # "Heading 1" placeholders in the template — stopping at real content.
+        run = []
+        j = i - 1
+        while j >= 0 and paras[j].text.strip() == "":
+            run.append(paras[j])
+            j -= 1
+        if len(run) > max_blanks:
+            for blank_p in run[max_blanks:]:
+                el = blank_p._p
+                if el.getparent() is not None:
+                    el.getparent().remove(el)
+
+
 # ─── PDF TO IMAGES ────────────────────────────────────────────────────────────
 
 def _pdf_to_images(pdf_bytes: bytes) -> list:
@@ -456,11 +509,26 @@ def _constrained_picture_dims(img_bytes: bytes, max_w: float = 2.9, max_h: float
 
 # ─── ADD CONTENT HELPERS ──────────────────────────────────────────────────────
 
-def _add_section_heading(doc, text: str):
+def _add_section_heading(doc, text: str, heading_pPr=None):
+    """
+    Adds a section heading. If `heading_pPr` (from _get_heading_pPr_template)
+    is supplied, the paragraph gets the template's real numbered "Heading 1"
+    formatting instead of plain bold text — so it matches the template's other
+    section headings and is picked up by the document's Table of Contents
+    field when Word refreshes it.
+    """
     para = doc.add_paragraph()
-    run = para.add_run(text)
-    run.bold = True
-    run.font.size = Pt(12)
+    if heading_pPr is not None:
+        new_pPr = deepcopy(heading_pPr)
+        existing_pPr = para._p.find(qn("w:pPr"))
+        if existing_pPr is not None:
+            para._p.remove(existing_pPr)
+        para._p.insert(0, new_pPr)
+        para.add_run(text)
+    else:
+        run = para.add_run(text)
+        run.bold = True
+        run.font.size = Pt(12)
     return para
 
 
@@ -621,6 +689,11 @@ def _strip_orphaned_images(docx_bytes: bytes) -> bytes:
 def build_report(data: dict) -> bytes:
     doc = Document(TEMPLATE_PATH)
 
+    # Captured before any mutation so appended sections (extra documents,
+    # custom certificates) can reuse the template's real numbered Heading 1
+    # formatting instead of plain bold text.
+    heading_pPr = _get_heading_pPr_template(doc, "On-Site Inspection Photographs")
+
     info           = data["info"]
     modifications  = data.get("modifications", [])
     tower_type     = data.get("tower_type", "Self Support")
@@ -628,7 +701,7 @@ def build_report(data: dict) -> bytes:
     photos         = data.get("photos", {})
     special_photos = data.get("special_photos", {})
     documents      = data.get("documents", {})
-    certificates   = data.get("certificates", [])
+    extra_documents = data.get("extra_documents", [])
     deficiencies   = data.get("deficiencies", "")
     no_deficiencies = data.get("no_deficiencies", True)
 
@@ -715,14 +788,32 @@ def build_report(data: dict) -> bytes:
     # ── 8. Field observations ────────────────────────────────────────────────
     field_obs = data.get("field_observations") or {}
     if not field_obs:
-        field_obs = generate_field_observations(modifications, tower_type)
+        try:
+            field_obs = generate_field_observations(modifications, tower_type)
+        except Exception:
+            field_obs = {}
     if field_obs:
         _replace_field_observations(doc, field_obs)
+
+    # Trim the template's oversized manual spacer paragraphs now that section
+    # content has its real (usually shorter) length, so headings like
+    # "Observed Deficiencies:" don't land under a near-empty page.
+    _collapse_excess_blank_paragraphs(doc)
 
     # ── 9. Truncate after photo heading ──────────────────────────────────────
     _truncate_after(doc, "On-Site Inspection Photographs")
 
-    # ── 10. Modification photo sections ──────────────────────────────────────
+    # ── 10 & 11. Photo sections — each group starts on its own page so a
+    # group's photos are never split 2-and-2 across a page boundary by
+    # Word's natural pagination.
+    first_group = True
+
+    def _start_group():
+        nonlocal first_group
+        if not first_group:
+            doc.add_page_break()
+        first_group = False
+
     for mod in modifications:
         mid  = mod["mod_id"]
         elev = mod["elevation"]
@@ -730,21 +821,23 @@ def build_report(data: dict) -> bytes:
             for pos in positions:
                 photo_list = photos.get((mid, pos), [])
                 if photo_list:
+                    _start_group()
                     _add_photo_group_heading(doc, f"{mid} ({elev}) – {pos}:")
                     _add_photo_table(doc, photo_list)
         else:
             photo_list = photos.get((mid, ""), [])
             if photo_list:
+                _start_group()
                 _add_photo_group_heading(doc, f"{mid} ({elev}):")
                 _add_photo_table(doc, photo_list)
 
-    # ── 11. Special photo sections ────────────────────────────────────────────
     for label, photo_list in special_photos.items():
         if photo_list:
+            _start_group()
             _add_photo_group_heading(doc, f"{label}:")
             _add_photo_table(doc, photo_list)
 
-    # ── 12. Supporting documents ──────────────────────────────────────────────
+    # ── 12. Supporting documents — tower-type-specific fixed checklist ───────
     if tower_type == "Guyed":
         doc_sections = [
             ("as_built_drawings",     "As-Built Drawings (EOR)"),
@@ -766,7 +859,7 @@ def build_report(data: dict) -> bytes:
 
     for doc_key, section_title in doc_sections:
         doc.add_page_break()
-        _add_section_heading(doc, f"{section_title}:")
+        _add_section_heading(doc, f"{section_title}:", heading_pPr)
         file_list = documents.get(doc_key, [])
         if file_list:
             for fb, fname, mime in file_list:
@@ -774,23 +867,34 @@ def build_report(data: dict) -> bytes:
         else:
             doc.add_paragraph("[Not provided]")
 
-    # ── 13. Certificates ─────────────────────────────────────────────────────
-    doc.add_page_break()
-    _add_section_heading(doc, "Certificates:")
-    if certificates:
-        for fb, fname, mime in certificates:
+    # ── 13. Certificates & extra documents — user-named, not a fixed generic
+    # "Certificates" bucket. Each entry is its own titled section (real
+    # Heading 1, continuing the template's numbering), so it shows up
+    # correctly both in the document body and in Word's Table of Contents
+    # field once refreshed.
+    for entry_name, file_list in extra_documents:
+        if not entry_name or not file_list:
+            continue
+        doc.add_page_break()
+        _add_section_heading(doc, f"{entry_name}:", heading_pPr)
+        for fb, fname, mime in file_list:
             _add_file(doc, fb, fname, mime)
-    else:
-        doc.add_paragraph("[Not provided]")
 
     # ── 14. Limitations ──────────────────────────────────────────────────────
     doc.add_page_break()
-    _add_section_heading(doc, "Limitations:")
+    _add_section_heading(doc, "Limitations:", heading_pPr)
     doc.add_paragraph(
         "This report is based on a visual only inspection conducted at the time of the site visit. "
         "Observations are limited to visible and accessible components only. "
         "No destructive testing or detailed structural analysis was performed."
     )
+
+    # Force Word to refresh fields (e.g. the Table of Contents) on open, so
+    # newly appended headings show up without the user manually pressing F9.
+    settings_el = doc.settings.element
+    update_fields = OxmlElement("w:updateFields")
+    update_fields.set(qn("w:val"), "true")
+    settings_el.insert(0, update_fields)
 
     buf = io.BytesIO()
     doc.save(buf)

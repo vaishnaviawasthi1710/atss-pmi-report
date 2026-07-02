@@ -45,7 +45,7 @@ SPECIAL_PHOTOS_BY_TOWER = {
     ],
 }
 
-REQUIRED_CERTS_MIN = 1
+REQUIRED_EXTRA_DOCS_MIN = 1
 
 
 def get_required_docs(tower_type: str) -> list:
@@ -67,11 +67,11 @@ def check_missing_items(data: dict) -> dict:
     """
     missing = {"photos": [], "documents": [], "certificates": []}
 
-    tower_type    = data.get("tower_type", "Self Support")
-    modifications = data.get("modifications", [])
-    photos        = data.get("photos", {})
-    documents     = data.get("documents", {})
-    certificates  = data.get("certificates", [])
+    tower_type      = data.get("tower_type", "Self Support")
+    modifications   = data.get("modifications", [])
+    photos          = data.get("photos", {})
+    documents       = data.get("documents", {})
+    extra_documents = data.get("extra_documents", [])
 
     positions = _get_positions(tower_type, data.get("num_guys", 3))
 
@@ -93,8 +93,9 @@ def check_missing_items(data: dict) -> dict:
         if not documents.get(doc_key):
             missing["documents"].append(doc_label)
 
-    if len(certificates) < REQUIRED_CERTS_MIN:
-        missing["certificates"].append("At least one certificate is required")
+    valid_extra_docs = [e for e in extra_documents if e.get("name", "").strip() and e.get("files")]
+    if len(valid_extra_docs) < REQUIRED_EXTRA_DOCS_MIN:
+        missing["certificates"].append("At least one certificate / extra document is required (name it and attach a file)")
 
     return missing
 

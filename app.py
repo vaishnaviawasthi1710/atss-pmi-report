@@ -85,104 +85,152 @@ def _get_credentials():
 
 
 def _login_page():
-    # Override block-container to be a centered white card; dark page bg
+    # Override block-container to be a centered light card; full-bleed tech/tower bg
     st.markdown("""
     <style>
     #MainMenu,footer,[data-testid="stHeader"],[data-testid="stToolbar"],
     [data-testid="stDecoration"]{display:none!important;}
 
     .stApp,[data-testid="stAppViewContainer"]{
-        background:linear-gradient(160deg,#030c1a 0%,#06172b 50%,#0b2044 100%)!important;
+        background:
+          radial-gradient(circle at 78% 18%,rgba(59,130,246,0.35) 0%,rgba(59,130,246,0) 42%),
+          radial-gradient(circle at 12% 82%,rgba(56,189,248,0.18) 0%,rgba(56,189,248,0) 45%),
+          linear-gradient(160deg,#050d1c 0%,#0a1c38 45%,#123163 100%)!important;
     }
-    /* Make the content area a centered white card */
-    .main .block-container{
-        max-width:460px!important;
-        padding:2.5rem 2.2rem 2rem!important;
-        background:white!important;
-        border-radius:18px!important;
-        margin:6vh auto 2rem!important;
-        box-shadow:0 24px 80px rgba(0,0,0,0.45),0 4px 16px rgba(0,0,0,0.25)!important;
+    /* Make the content area a centered light card.
+       Targets the real container hook for this Streamlit version
+       (data-testid, not the old ".main" wrapper class) with enough
+       specificity to beat the global CSS block that loads unconditionally
+       before the login gate. */
+    div[data-testid="stMainBlockContainer"]{
+        max-width:420px!important;
+        padding:2.2rem 2rem 1.8rem!important;
+        background:#eef1f4!important;
+        border-radius:14px!important;
+        margin:7vh auto 2rem!important;
+        box-shadow:0 28px 90px rgba(0,0,0,0.5),0 4px 18px rgba(0,0,0,0.3)!important;
         position:relative!important;
         z-index:1!important;
+        border:1px solid rgba(255,255,255,0.6)!important;
     }
     /* Inputs inside the card */
-    .stTextInput>div>div>input{
-        background:#f8fafc!important; border:1.5px solid #e2e8f0!important;
-        border-radius:9px!important; color:#1e293b!important;
-        font-size:0.91rem!important; padding:0.7rem 0.9rem!important;
+    .stTextInput.stTextInput>div>div>input{
+        background:#ffffff!important; border:1.5px solid #d7dce3!important;
+        border-radius:7px!important; color:#1e293b!important;
+        font-size:0.9rem!important; padding:0.65rem 0.85rem!important;
     }
-    .stTextInput>div>div>input:focus{
-        border-color:#1d4ed8!important;
-        box-shadow:0 0 0 3px rgba(29,78,216,0.12)!important;
+    .stTextInput.stTextInput>div>div>input:focus{
+        border-color:#22406e!important;
+        box-shadow:0 0 0 3px rgba(34,64,110,0.14)!important;
     }
-    .stTextInput label{
-        font-size:0.72rem!important; font-weight:700!important;
+    .stTextInput.stTextInput label{
+        font-size:0.7rem!important; font-weight:700!important;
         color:#64748b!important; text-transform:uppercase!important;
         letter-spacing:0.5px!important;
     }
-    /* Sign In button */
-    .stButton>button{
-        background:linear-gradient(135deg,#1d4ed8 0%,#3b82f6 100%)!important;
-        color:white!important; border:none!important; border-radius:10px!important;
+    /* Login button */
+    .stButton.stButton>button{
+        background:#1f3a63!important;
+        color:white!important; border:none!important; border-radius:7px!important;
         font-weight:700!important; font-size:0.92rem!important; width:100%!important;
-        padding:0.7rem!important;
-        box-shadow:0 4px 16px rgba(29,78,216,0.35)!important;
+        padding:0.65rem!important;
+        box-shadow:0 4px 14px rgba(31,58,99,0.4)!important;
         transition:all 0.2s!important;
     }
-    .stButton>button:hover{
-        box-shadow:0 6px 22px rgba(29,78,216,0.45)!important;
+    .stButton.stButton>button:hover{
+        background:#28477a!important;
+        box-shadow:0 6px 20px rgba(31,58,99,0.5)!important;
         transform:translateY(-1px)!important;
+    }
+    /* Google (secondary) button */
+    .stButton.stButton>button[kind="secondary"]{
+        background:#ffffff!important; color:#334155!important;
+        border:1.5px solid #d7dce3!important; box-shadow:none!important;
+        font-weight:600!important;
+    }
+    .stButton.stButton>button[kind="secondary"]:hover{
+        background:#f8fafc!important; border-color:#c3cad4!important;
+        transform:none!important;
     }
     </style>
     """, unsafe_allow_html=True)
 
-    # Tower SVG fixed in background (decorative)
-    tower_small = _TOWER_SVG.replace(
+    # ── Full-bleed background: tower silhouettes + circuit/tech accents ────────
+    tower_bg = _TOWER_SVG.replace(
         'viewBox="0 0 300 720"',
-        'viewBox="0 0 300 720" width="340" height="816"'
+        'viewBox="0 0 300 720" width="260" height="624"'
     )
     st.markdown(f"""
-    <div style="position:fixed;bottom:-8%;right:2%;opacity:0.055;
-         pointer-events:none;z-index:0;transform:rotate(3deg);">
-      {tower_small}
-    </div>
-    <div style="position:fixed;bottom:-8%;left:2%;opacity:0.035;
-         pointer-events:none;z-index:0;transform:rotate(-3deg) scaleX(-1);">
-      {tower_small}
+    <div style="position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:0;overflow:hidden;">
+      <div style="position:absolute;bottom:-4%;left:3%;opacity:0.16;transform:rotate(-2deg);">{tower_bg}</div>
+      <div style="position:absolute;bottom:-4%;right:4%;opacity:0.13;transform:rotate(2deg) scaleX(-1);">{tower_bg}</div>
+      <svg style="position:absolute;top:6%;right:10%;opacity:0.25;" width="220" height="220" viewBox="0 0 220 220">
+        <circle cx="110" cy="110" r="95" fill="none" stroke="#5aa9ff" stroke-width="1"/>
+        <circle cx="110" cy="110" r="65" fill="none" stroke="#5aa9ff" stroke-width="1"/>
+        <circle cx="110" cy="110" r="4" fill="#5aa9ff"/>
+        <line x1="110" y1="15" x2="110" y2="45" stroke="#5aa9ff" stroke-width="1"/>
+        <line x1="110" y1="175" x2="110" y2="205" stroke="#5aa9ff" stroke-width="1"/>
+        <line x1="15" y1="110" x2="45" y2="110" stroke="#5aa9ff" stroke-width="1"/>
+        <line x1="175" y1="110" x2="205" y2="110" stroke="#5aa9ff" stroke-width="1"/>
+      </svg>
+      <svg style="position:absolute;top:0;left:0;" width="100%" height="100%" opacity="0.06">
+        <pattern id="grid" width="46" height="46" patternUnits="userSpaceOnUse">
+          <path d="M 46 0 L 0 0 0 46" fill="none" stroke="#5aa9ff" stroke-width="0.6"/>
+        </pattern>
+        <rect width="100%" height="100%" fill="url(#grid)"/>
+      </svg>
     </div>
     """, unsafe_allow_html=True)
 
     # ── Card content ──────────────────────────────────────────────────────────
 
-    # Logo header
-    st.markdown(f"""
-    <div style="text-align:center;margin-bottom:1.8rem;">
-      <div style="display:inline-flex;align-items:center;gap:0.6rem;
-           background:linear-gradient(135deg,#040d1a,#0d1e40);
-           border:1.5px solid rgba(29,78,216,0.4);border-radius:14px;
-           padding:0.6rem 1.1rem;margin-bottom:1rem;">
-        {_LOGO_ICON}
-        <div style="text-align:left;">
-          <div style="font-size:1.3rem;font-weight:900;color:#fff;letter-spacing:-0.5px;
-               line-height:1;font-family:'Inter',sans-serif;">ATSS</div>
-          <div style="font-size:0.52rem;color:#5b8abf;text-transform:uppercase;
-               letter-spacing:1.8px;margin-top:2px;font-family:'Inter',sans-serif;">
-               Advanced Tower Structural Solutions</div>
-        </div>
+    # Logo header (ATS wordmark, top-left aligned like reference)
+    st.markdown("""
+    <div style="margin-bottom:1.4rem;">
+      <div style="display:flex;align-items:baseline;gap:2px;margin-bottom:1.1rem;">
+        <span style="font-size:1.5rem;font-weight:900;color:#0f172a;letter-spacing:-0.5px;
+             font-family:'Inter',sans-serif;">ATSS</span>
+        <span style="font-size:1.1rem;font-weight:900;color:#a3e635;line-height:1;">&rsquo;</span>
       </div>
-      <div style="font-size:1.35rem;font-weight:800;color:#0f172a;letter-spacing:-0.5px;
-           font-family:'Inter',sans-serif;">Sign in to your account</div>
-      <div style="font-size:0.8rem;color:#64748b;margin-top:0.3rem;
-           font-family:'Inter',sans-serif;">PMI Closeout Report Generator</div>
+      <div style="font-size:1.25rem;font-weight:800;color:#0f172a;letter-spacing:-0.4px;
+           font-family:'Inter',sans-serif;">Login to your account</div>
+      <div style="font-size:0.84rem;color:#64748b;margin-top:0.15rem;
+           font-family:'Inter',sans-serif;">Welcome Back!</div>
     </div>
     """, unsafe_allow_html=True)
 
-    username_input = st.text_input("Username", placeholder="Enter username", key="login_username")
-    password_input = st.text_input("Password", type="password", placeholder="Enter password", key="login_password")
+    username_input = st.text_input("Username", placeholder="Enter username", key="login_username", label_visibility="collapsed")
+    password_input = st.text_input("Password", type="password", placeholder="Enter password", key="login_password", label_visibility="collapsed")
 
-    st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:0.7rem'></div>", unsafe_allow_html=True)
 
-    if st.button("Sign In", type="primary", use_container_width=True, key="login_btn"):
+    login_clicked = st.button("Login", type="primary", use_container_width=True, key="login_btn")
+
+    st.markdown("""
+    <div style="text-align:center;margin-top:0.85rem;">
+      <a href="#" style="font-size:0.78rem;color:#1f3a63;font-weight:600;
+         text-decoration:none;font-family:'Inter',sans-serif;">Forgot Password?</a>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.7rem;margin:1.1rem 0 0.9rem;">
+      <div style="flex:1;height:1px;background:#d7dce3;"></div>
+      <span style="font-size:0.72rem;color:#94a3b8;font-weight:700;
+           font-family:'Inter',sans-serif;">OR</span>
+      <div style="flex:1;height:1px;background:#d7dce3;"></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    google_clicked = st.button("🔵 Continue with Google", type="secondary", use_container_width=True, key="google_btn")
+    if google_clicked:
+        st.toast("Google Sign-In isn't configured yet — use your username/password.", icon="ℹ️")
+
+    st.markdown("""
+    <div style="text-align:center;margin-top:1.6rem;font-size:0.66rem;color:#94a3b8;
+         font-family:'Inter',sans-serif;">
+      © 2026 Advanced Tower Structural Solutions LLC
+    </div>
+    """, unsafe_allow_html=True)
+
+    if login_clicked:
         valid_user, valid_pass = _get_credentials()
         if username_input == valid_user and password_input == valid_pass:
             st.session_state["authenticated"] = True
@@ -191,27 +239,11 @@ def _login_page():
         else:
             st.markdown("""
             <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;
-                 padding:0.65rem 0.9rem;margin-top:0.6rem;color:#dc2626;font-size:0.81rem;
+                 padding:0.65rem 0.9rem;margin-top:0.8rem;color:#dc2626;font-size:0.81rem;
                  font-family:'Inter',sans-serif;">
               Incorrect username or password.
             </div>
             """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <div style="margin-top:1.4rem;padding:0.8rem 0.9rem;background:#f0f9ff;
-         border:1px solid #bae6fd;border-radius:9px;">
-      <div style="font-size:0.66rem;font-weight:700;color:#0284c7;text-transform:uppercase;
-           letter-spacing:0.5px;margin-bottom:0.25rem;font-family:'Inter',sans-serif;">
-           Development Build</div>
-      <div style="font-size:0.76rem;color:#0369a1;font-family:'Inter',sans-serif;">
-        Contact your administrator for access credentials.
-      </div>
-    </div>
-    <div style="text-align:center;margin-top:1.4rem;font-size:0.66rem;color:#94a3b8;
-         font-family:'Inter',sans-serif;">
-      © 2025 Advanced Tower Structural Solutions LLC
-    </div>
-    """, unsafe_allow_html=True)
 
 # ── Main App CSS ──────────────────────────────────────────────────────────────
 st.markdown("""
@@ -221,7 +253,7 @@ html,body,[class*="css"]{font-family:'Inter',-apple-system,BlinkMacSystemFont,sa
 
 /* App background */
 .stApp { background: #eef2f8 !important; }
-.main .block-container {
+div[data-testid="stMainBlockContainer"] {
     padding: 1.5rem 2.2rem 3rem !important;
     max-width: 1080px !important;
 }
@@ -381,13 +413,14 @@ def _init():
         "photos": {},
         "special_photos": {},
         "documents": {},
-        "certificates": [],
+        "extra_documents": [],  # [{"name": str, "files": [(bytes, filename, mime), ...]}, ...]
         "deficiencies": "",
         "no_deficiencies": True,
         "num_guys": 3,
         "photo_captions": {},
         "field_observations": {},
         "obs_generated": False,
+        "obs_gen_error": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -418,6 +451,30 @@ def _mime(filename: str) -> str:
 
 def _tower_type() -> str:
     return st.session_state.project_info.get("tower_type", "Self Support")
+
+
+def _friendly_ai_error(e: Exception) -> str:
+    """
+    Gemini errors come back as long raw API JSON blobs — fine for logs,
+    unreadable for end users. Collapse the common cases to one clear
+    sentence and log the full detail to the console (visible in Streamlit
+    Cloud logs) for debugging.
+    """
+    import traceback
+    print(f"[AI ERROR] {type(e).__name__}: {e}")
+    traceback.print_exc()
+
+    msg = str(e)
+    if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "quota" in msg.lower():
+        return (
+            "Gemini API quota/billing limit reached for this API key "
+            "(Google is rejecting requests — free-tier quota is 0 on this project). "
+            "Check the key's plan & billing at https://aistudio.google.com/apikey, "
+            "then try again."
+        )
+    if "API_KEY_INVALID" in msg or "401" in msg or "PERMISSION_DENIED" in msg:
+        return "Gemini API key is invalid or missing permissions. Check GEMINI_API_KEY."
+    return f"{msg[:200]} (see server logs for the full traceback)"
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -684,7 +741,7 @@ if st.session_state.step == 1:
                         st.success(f"Fields extracted from {prefilled_file.name}. Review and edit below.")
                         st.rerun()
                 except Exception as e:
-                    st.error(f"Extraction failed: {e}")
+                    st.error(f"Extraction failed: {_friendly_ai_error(e)}")
 
     st.markdown("---")
     p = st.session_state.project_info
@@ -841,7 +898,7 @@ elif st.session_state.step == 3:
                             with st.expander(f"Extracted fields — {f.name}"):
                                 st.json(extracted)
                         except Exception as e:
-                            st.warning(f"Could not auto-extract from {f.name}: {e}")
+                            st.warning(f"Could not auto-extract from {f.name}: {_friendly_ai_error(e)}")
             docs[doc_key] = file_list
             st.session_state.documents = docs
         elif doc_key in docs:
@@ -849,31 +906,41 @@ elif st.session_state.step == 3:
 
         st.markdown("---")
 
-    st.markdown("##### Certificates")
-    st.caption("Upload all project certificates (welder certs, material test certs, etc.)")
-    cert_uploads = st.file_uploader(
-        "Upload Certificates",
-        type=["pdf", "jpg", "jpeg", "png"],
-        accept_multiple_files=True,
-        key="upload_certs",
+    st.markdown("##### Certificates & Additional Documents")
+    st.caption(
+        "Add each certificate or extra document with its own name (e.g. \"Welder Certification\", "
+        "\"Tension Gauge Calibration Certificate\"). Each one becomes its own titled section in the "
+        "report, listed by that name in the document and in Word's Table of Contents."
     )
-    if cert_uploads:
-        cert_list = []
-        for f in cert_uploads:
-            fb = f.read()
-            mime = _mime(f.name)
-            cert_list.append((fb, f.name, mime))
-            with st.spinner(f"Extracting from {f.name}…"):
-                try:
-                    extracted = extract_document_fields(fb, f.name, "certificate")
-                    with st.expander(f"Extracted — {f.name}"):
-                        st.json(extracted)
-                except Exception as e:
-                    st.warning(f"Could not extract from {f.name}: {e}")
-        st.session_state.certificates = cert_list
 
-    if st.session_state.certificates:
-        st.success(f"✅  {len(st.session_state.certificates)} certificate(s) uploaded")
+    extra_docs = st.session_state.extra_documents
+
+    for i, entry in enumerate(extra_docs):
+        cols = st.columns([3, 4, 1])
+        with cols[0]:
+            entry["name"] = st.text_input(
+                "Section name", value=entry.get("name", ""),
+                placeholder="e.g. Welder Certification",
+                key=f"extradoc_name_{i}", label_visibility="collapsed",
+            )
+        with cols[1]:
+            uploaded = st.file_uploader(
+                "Files", type=["pdf", "docx", "jpg", "jpeg", "png"],
+                accept_multiple_files=True, key=f"extradoc_files_{i}",
+                label_visibility="collapsed",
+            )
+            if uploaded:
+                entry["files"] = [(f.read(), f.name, _mime(f.name)) for f in uploaded]
+            elif entry.get("files"):
+                st.caption(f"✅ {len(entry['files'])} file(s) attached")
+        with cols[2]:
+            if st.button("🗑️", key=f"extradoc_del_{i}"):
+                extra_docs.pop(i)
+                st.rerun()
+
+    if st.button("+ Add certificate / document"):
+        extra_docs.append({"name": "", "files": []})
+        st.rerun()
 
     st.markdown("---")
     if st.button("Next →", type="primary"):
@@ -932,7 +999,7 @@ elif st.session_state.step == 4:
                                     caption = analyze_photo(fb, mime, context)
                                 except Exception as e:
                                     caption = f"{mid} {pos} — {mod['description']}"
-                                    st.warning(f"Caption failed: {e}")
+                                    st.warning(f"Caption failed: {_friendly_ai_error(e)}")
                             st.image(fb, caption=caption, width=280)
                             photo_list.append((fb, caption, mime))
                         photos[key] = photo_list
@@ -962,7 +1029,7 @@ elif st.session_state.step == 4:
                             caption = analyze_photo(fb, mime, context)
                         except Exception as e:
                             caption = f"{mid} — {mod['description']}"
-                            st.warning(f"Caption failed: {e}")
+                            st.warning(f"Caption failed: {_friendly_ai_error(e)}")
                     st.image(fb, caption=caption, width=280)
                     photo_list.append((fb, caption, mime))
                 photos[key] = photo_list
@@ -997,7 +1064,7 @@ elif st.session_state.step == 4:
                         caption = analyze_photo(fb, mime, context)
                     except Exception as e:
                         caption = f"{label} — site photograph."
-                        st.warning(f"Caption failed: {e}")
+                        st.warning(f"Caption failed: {_friendly_ai_error(e)}")
                 st.image(fb, caption=caption, width=280)
                 photo_list.append((fb, caption, mime))
             st.session_state.special_photos[label] = photo_list
@@ -1029,7 +1096,7 @@ elif st.session_state.step == 5:
         "num_guys":      st.session_state.num_guys,
         "photos":        dict(st.session_state.photos),
         "documents":     st.session_state.documents,
-        "certificates":  st.session_state.certificates,
+        "extra_documents": st.session_state.extra_documents,
     }
     special = st.session_state.special_photos
     for label, pl in special.items():
@@ -1077,31 +1144,31 @@ elif st.session_state.step == 5:
                      'padding:2px 9px;border-radius:20px;">✓ Uploaded</span>' if uploaded
                      else '<span style="background:#fee2e2;color:#991b1b;font-size:0.72rem;font-weight:700;'
                      'padding:2px 9px;border-radius:20px;">✗ Missing</span>')
-            rows_html += f"""
-            <div style="display:flex;justify-content:space-between;align-items:center;
-                 padding:0.35rem 0;border-bottom:1px solid #f0f4f8;font-size:0.85rem;">
-              <span style="color:#374151;">{doc_label}</span>{badge}
-            </div>"""
+            rows_html += (
+                f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                f'padding:0.35rem 0;border-bottom:1px solid #f0f4f8;font-size:0.85rem;">'
+                f'<span style="color:#374151;">{doc_label}</span>{badge}</div>'
+            )
 
-        cert_count = len(st.session_state.certificates)
+        cert_count = len([e for e in st.session_state.extra_documents if e.get("name", "").strip() and e.get("files")])
         cert_badge = (f'<span style="background:#dcfce7;color:#166534;font-size:0.72rem;font-weight:700;'
                       f'padding:2px 9px;border-radius:20px;">✓ {cert_count} uploaded</span>' if cert_count
                       else '<span style="background:#fee2e2;color:#991b1b;font-size:0.72rem;font-weight:700;'
                       'padding:2px 9px;border-radius:20px;">✗ Missing</span>')
-        rows_html += f"""
-        <div style="display:flex;justify-content:space-between;align-items:center;
-             padding:0.35rem 0;font-size:0.85rem;margin-top:0.25rem;">
-          <span style="color:#374151;font-weight:500;">Certificates</span>{cert_badge}
-        </div>"""
+        rows_html += (
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'padding:0.35rem 0;font-size:0.85rem;margin-top:0.25rem;">'
+            f'<span style="color:#374151;font-weight:500;">Certificates & Extra Docs</span>{cert_badge}</div>'
+        )
 
-        st.markdown(f"""
-        <div style="background:white;border-radius:12px;padding:1.3rem 1.5rem;
-             box-shadow:0 2px 10px rgba(0,0,0,0.06);border:1px solid #e4ecf7;margin-bottom:1rem;">
-          <div style="font-size:0.7rem;font-weight:700;color:#6b7fa8;text-transform:uppercase;
-               letter-spacing:1px;margin-bottom:0.75rem;">Document Checklist</div>
-          {rows_html}
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="background:white;border-radius:12px;padding:1.3rem 1.5rem;'
+            f'box-shadow:0 2px 10px rgba(0,0,0,0.06);border:1px solid #e4ecf7;margin-bottom:1rem;">'
+            f'<div style="font-size:0.7rem;font-weight:700;color:#6b7fa8;text-transform:uppercase;'
+            f'letter-spacing:1px;margin-bottom:0.75rem;">Document Checklist</div>'
+            f'{rows_html}</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Missing items card ────────────────────────────────────────────────────
     if total_missing == 0:
@@ -1121,24 +1188,23 @@ elif st.session_state.step == 5:
         for category, items in missing.items():
             if items:
                 items_str = " &nbsp;·&nbsp; ".join(items)
-                sections_html += f"""
-                <div style="margin-top:0.6rem;">
-                  <div style="font-size:0.78rem;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:0.5px;">{icons.get(category,"")} {category}</div>
-                  <div style="font-size:0.83rem;color:#78350f;margin-top:3px;line-height:1.6;">{items_str}</div>
-                </div>"""
+                sections_html += (
+                    f'<div style="margin-top:0.6rem;">'
+                    f'<div style="font-size:0.78rem;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:0.5px;">{icons.get(category,"")} {category}</div>'
+                    f'<div style="font-size:0.83rem;color:#78350f;margin-top:3px;line-height:1.6;">{items_str}</div>'
+                    f'</div>'
+                )
 
-        st.markdown(f"""
-        <div style="background:#fffbeb;border:1.5px solid #f59e0b;border-radius:10px;
-             padding:1rem 1.4rem;margin:0.5rem 0 1rem 0;">
-          <div style="font-weight:700;color:#92400e;font-size:0.95rem;margin-bottom:0.25rem;">
-            ⚠️ &nbsp;{total_missing} Item{'s' if total_missing>1 else ''} Missing
-          </div>
-          <div style="font-size:0.8rem;color:#a16207;">
-            The report can still be generated, but the following sections will show [Not provided].
-          </div>
-          {sections_html}
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="background:#fffbeb;border:1.5px solid #f59e0b;border-radius:10px;'
+            f'padding:1rem 1.4rem;margin:0.5rem 0 1rem 0;">'
+            f'<div style="font-weight:700;color:#92400e;font-size:0.95rem;margin-bottom:0.25rem;">'
+            f'⚠️ &nbsp;{total_missing} Item{"s" if total_missing > 1 else ""} Missing</div>'
+            f'<div style="font-size:0.8rem;color:#a16207;">'
+            f'The report can still be generated, but the following sections will show [Not provided].</div>'
+            f'{sections_html}</div>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
 
@@ -1159,24 +1225,34 @@ elif st.session_state.step == 5:
         if not st.session_state.obs_generated or not st.session_state.field_observations:
             if st.button("✨  Generate AI Observations", type="primary", key="btn_gen_obs"):
                 with st.spinner("Generating field observations with AI…"):
-                    obs = generate_field_observations(mods, tower_type)
-                    if obs:
-                        st.session_state.field_observations = obs
-                        st.session_state.obs_generated = True
-                        st.rerun()
-                    else:
-                        st.warning("Could not generate observations. You can type them manually below.")
+                    try:
+                        obs = generate_field_observations(mods, tower_type)
+                        st.session_state.field_observations = obs or {s: ["", ""] for s in obs_sections}
+                        st.session_state.obs_gen_error = None if obs else "AI returned no observations."
+                    except Exception as e:
                         st.session_state.field_observations = {s: ["", ""] for s in obs_sections}
-                        st.session_state.obs_generated = True
-                        st.rerun()
+                        st.session_state.obs_gen_error = _friendly_ai_error(e)
+                    st.session_state.obs_generated = True
+                    st.rerun()
     with col_regen:
         if st.session_state.obs_generated:
             if st.button("🔄  Regenerate", key="btn_regen_obs"):
                 with st.spinner("Regenerating…"):
-                    obs = generate_field_observations(mods, tower_type)
-                    if obs:
-                        st.session_state.field_observations = obs
-                        st.rerun()
+                    try:
+                        obs = generate_field_observations(mods, tower_type)
+                        if obs:
+                            st.session_state.field_observations = obs
+                            st.session_state.obs_gen_error = None
+                        else:
+                            st.session_state.obs_gen_error = "AI returned no observations."
+                    except Exception as e:
+                        st.session_state.obs_gen_error = _friendly_ai_error(e)
+                    st.rerun()
+
+    # Persisted across the rerun above — a warning shown right before st.rerun()
+    # would otherwise be wiped before the user ever sees it.
+    if st.session_state.get("obs_gen_error"):
+        st.warning(f"{st.session_state.obs_gen_error} You can type observations manually below.")
 
     if st.session_state.obs_generated and st.session_state.field_observations:
         field_obs = st.session_state.field_observations
@@ -1225,7 +1301,10 @@ elif st.session_state.step == 5:
                     "photos":             st.session_state.photos,
                     "special_photos":     st.session_state.special_photos,
                     "documents":          st.session_state.documents,
-                    "certificates":       st.session_state.certificates,
+                    "extra_documents":    [
+                        (e["name"], e["files"]) for e in st.session_state.extra_documents
+                        if e.get("name", "").strip() and e.get("files")
+                    ],
                     "deficiencies":       deficiencies,
                     "no_deficiencies":    st.session_state.no_deficiencies,
                     "tower_type":         tower_type,
@@ -1241,5 +1320,4 @@ elif st.session_state.step == 5:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             except Exception as e:
-                st.error(f"Report generation failed: {e}")
-                st.exception(e)
+                st.error(f"Report generation failed: {_friendly_ai_error(e)}")
