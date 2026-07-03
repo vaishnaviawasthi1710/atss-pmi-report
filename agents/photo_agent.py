@@ -5,6 +5,8 @@ from google.genai import types
 from PIL import Image
 from dotenv import load_dotenv
 
+from agents.retry import generate_content_with_retry
+
 load_dotenv()
 
 MODEL = "gemini-2.5-flash"
@@ -69,7 +71,8 @@ def analyze_photo(image_bytes: bytes, mime_type: str, context: dict) -> str:
 
     img = Image.open(io.BytesIO(image_bytes))
     client = _client()
-    response = client.models.generate_content(
+    response = generate_content_with_retry(
+        client,
         model=MODEL,
         contents=[prompt, img],
     )

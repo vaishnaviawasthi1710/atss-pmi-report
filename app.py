@@ -20,6 +20,10 @@ from utils.validators import (
     check_missing_items, get_required_docs, get_special_photos,
 )
 from utils.docx_builder import build_report, generate_field_observations, OBS_SECTIONS_BY_TOWER
+from utils.gallery import (
+    sig, uploader_key, bump_uploader, new_uploads,
+    render_file_gallery, render_photo_gallery,
+)
 
 st.set_page_config(
     page_title="PMI Closeout Report Generator — ATSS",
@@ -421,6 +425,7 @@ def _init():
         "field_observations": {},
         "obs_generated": False,
         "obs_gen_error": None,
+        "_doc_extractions": {},  # {(doc_key, sig): extracted_dict} — AI extraction results, shown in gallery previews
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -467,14 +472,119 @@ def _friendly_ai_error(e: Exception) -> str:
     msg = str(e)
     if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "quota" in msg.lower():
         return (
-            "Gemini API quota/billing limit reached for this API key "
-            "(Google is rejecting requests — free-tier quota is 0 on this project). "
-            "Check the key's plan & billing at https://aistudio.google.com/apikey, "
-            "then try again."
+            "Gemini rate limit hit — this already retried a couple of times "
+            "before giving up, so the API key's quota is genuinely exhausted "
+            "for now (not just a brief burst). Wait a bit and try again, or "
+            "check the key's plan & billing at https://aistudio.google.com/apikey."
         )
     if "API_KEY_INVALID" in msg or "401" in msg or "PERMISSION_DENIED" in msg:
         return "Gemini API key is invalid or missing permissions. Check GEMINI_API_KEY."
     return f"{msg[:200]} (see server logs for the full traceback)"
+
+
+# ── Upload gallery helpers ───────────────────────────────────────────────────
+# Factories (not bare closures inline in a loop) so each one binds its own
+# doc_key / dict_key at creation time — avoids the classic Python
+# late-binding-in-a-loop bug where every closure would end up sharing the
+# *last* loop iteration's key.
+
+def _make_doc_processor(doc_key: str):
+    def _process(f, fb):
+        mime = _mime(f.name)
+        if doc_key not in ("as_built_drawings", "guy_tension_chart", "plumb_twist_report"):
+            with st.spinner(f"Extracting data from {f.name}…"):
+                try:
+                    extracted = extract_document_fields(fb, f.name, doc_key)
+                    st.session_state._doc_extractions[(doc_key, sig(f.name, fb))] = extracted
+                    st.toast(f"Extracted from {f.name}", icon="✅")
+                except Exception as e:
+                    st.warning(f"Could not auto-extract from {f.name}: {_friendly_ai_error(e)}")
+        return (fb, f.name, mime)
+    return _process
+
+
+def _make_plain_file_processor():
+    def _process(f, fb):
+        return (fb, f.name, _mime(f.name))
+    return _process
+
+
+def _make_doc_extraction_note(doc_key: str, items: list):
+    def _note(idx, fname):
+        fb = items[idx][0]
+        extracted = st.session_state._doc_extractions.get((doc_key, sig(fname, fb)))
+        if not extracted or "error" in extracted:
+            return None
+        parts = [f"{k}={v}" for k, v in extracted.items() if v and k != "raw_extract"]
+        return "AI extracted: " + ", ".join(parts) if parts else None
+    return _note
+
+
+def _make_list_delete(items: list):
+    def _delete(idx):
+        items.pop(idx)
+    return _delete
+
+
+def _doc_upload_section(doc_key: str, label: str, items: list, on_added):
+    """
+    Renders an "add files" uploader + persistent gallery for one document
+    slot. `items` is the list currently stored for this slot (mutated via
+    on_added when new files arrive). Runs AI field extraction only on
+    genuinely new files — not on every rerun — which is also what keeps
+    Gemini call volume from ballooning as the user works through the form.
+    """
+    uid = f"doc_{doc_key}"
+    uploaded = st.file_uploader(
+        f"Upload {label} (PDF, Word, or image)",
+        type=["pdf", "docx", "jpg", "jpeg", "png"],
+        key=uploader_key(uid),
+        accept_multiple_files=True,
+    )
+    existing_sigs = {sig(fn, fb) for fb, fn, _m in items}
+    added = new_uploads(existing_sigs, uploaded, _make_doc_processor(doc_key))
+    if added:
+        on_added(added)
+        bump_uploader(uid)
+        st.rerun()
+
+    render_file_gallery(
+        items,
+        on_delete=_make_list_delete(items),
+        key_prefix=f"gal_{uid}",
+        extraction_note=_make_doc_extraction_note(doc_key, items),
+    )
+
+
+def _photo_upload_section(uid: str, label: str, items: list, on_added, context: dict):
+    """
+    Renders an "add photos" uploader + persistent thumbnail gallery for one
+    modification/position or special-photo slot. AI captioning only runs
+    on genuinely new files.
+    """
+    uploaded = st.file_uploader(
+        label, type=["jpg", "jpeg", "png"], accept_multiple_files=True,
+        key=uploader_key(uid),
+    )
+    existing_sigs = {sig(fn, fb) for fb, _cap, _m, fn in items}
+
+    def _process(f, fb):
+        mime = _mime(f.name)
+        with st.spinner(f"Generating caption for {f.name}…"):
+            try:
+                caption = analyze_photo(fb, mime, context)
+            except Exception as e:
+                caption = context.get("fallback_caption", "Site photograph.")
+                st.warning(f"Caption failed for {f.name}: {_friendly_ai_error(e)}")
+        return (fb, caption, mime, f.name)
+
+    added = new_uploads(existing_sigs, uploaded, _process)
+    if added:
+        on_added(added)
+        bump_uploader(uid)
+        st.rerun()
+
+    render_photo_gallery(items, on_delete=_make_list_delete(items), key_prefix=f"gal_{uid}")
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -878,32 +988,13 @@ elif st.session_state.step == 3:
 
     for doc_key, doc_label in required_docs:
         st.markdown(f"##### {doc_label}")
-        uploaded = st.file_uploader(
-            f"Upload {doc_label} (PDF, Word, or image)",
-            type=["pdf", "docx", "jpg", "jpeg", "png"],
-            key=f"upload_{doc_key}",
-            accept_multiple_files=True,
-        )
-        if uploaded:
-            file_list = []
-            for f in uploaded:
-                fb = f.read()
-                mime = _mime(f.name)
-                file_list.append((fb, f.name, mime))
-                if doc_key not in ("as_built_drawings", "guy_tension_chart", "plumb_twist_report"):
-                    with st.spinner(f"Extracting data from {f.name}…"):
-                        try:
-                            extracted = extract_document_fields(fb, f.name, doc_key)
-                            st.success(f"Extracted from {f.name}")
-                            with st.expander(f"Extracted fields — {f.name}"):
-                                st.json(extracted)
-                        except Exception as e:
-                            st.warning(f"Could not auto-extract from {f.name}: {_friendly_ai_error(e)}")
-            docs[doc_key] = file_list
-            st.session_state.documents = docs
-        elif doc_key in docs:
-            st.success(f"✅  {len(docs[doc_key])} file(s) uploaded")
+        items = docs.setdefault(doc_key, [])
 
+        def _on_added(new_items, _dk=doc_key, _items=items):
+            docs[_dk] = _items + new_items
+            st.session_state.documents = docs
+
+        _doc_upload_section(doc_key, doc_label, items, _on_added)
         st.markdown("---")
 
     st.markdown("##### Certificates & Additional Documents")
@@ -924,19 +1015,29 @@ elif st.session_state.step == 3:
                 key=f"extradoc_name_{i}", label_visibility="collapsed",
             )
         with cols[1]:
+            items = entry.setdefault("files", [])
+            uid = f"extradoc_{i}"
             uploaded = st.file_uploader(
                 "Files", type=["pdf", "docx", "jpg", "jpeg", "png"],
-                accept_multiple_files=True, key=f"extradoc_files_{i}",
+                accept_multiple_files=True, key=uploader_key(uid),
                 label_visibility="collapsed",
             )
-            if uploaded:
-                entry["files"] = [(f.read(), f.name, _mime(f.name)) for f in uploaded]
-            elif entry.get("files"):
-                st.caption(f"✅ {len(entry['files'])} file(s) attached")
+            existing_sigs = {sig(fn, fb) for fb, fn, _m in items}
+            added = new_uploads(existing_sigs, uploaded, _make_plain_file_processor())
+            if added:
+                entry["files"] = items + added
+                bump_uploader(uid)
+                st.rerun()
         with cols[2]:
             if st.button("🗑️", key=f"extradoc_del_{i}"):
                 extra_docs.pop(i)
                 st.rerun()
+
+        if entry.get("files"):
+            render_file_gallery(
+                entry["files"], on_delete=_make_list_delete(entry["files"]),
+                key_prefix=f"gal_extradoc_{i}",
+            )
 
     if st.button("+ Add certificate / document"):
         extra_docs.append({"name": "", "files": []})
@@ -969,6 +1070,11 @@ elif st.session_state.step == 4:
         "Upload photos for each modification and position. AI will auto-generate structural captions.",
     )
 
+    def _make_photo_on_added(photos_dict, key):
+        def _on_added(new_items):
+            photos_dict[key] = photos_dict.get(key, []) + new_items
+        return _on_added
+
     for mod in mods:
         mid = mod["mod_id"]
         st.markdown(f"##### {mid}: {mod['description'][:80]}{'…' if len(mod['description']) > 80 else ''}")
@@ -978,100 +1084,53 @@ elif st.session_state.step == 4:
             for tab, pos in zip(tabs, positions):
                 with tab:
                     key = (mid, pos)
-                    uploads = st.file_uploader(
-                        f"Photos — {mid} {pos}",
-                        type=["jpg", "jpeg", "png"],
-                        accept_multiple_files=True,
-                        key=f"photos_{mid}_{pos}",
-                    )
-                    if uploads:
-                        photo_list = []
-                        for f in uploads:
-                            fb = f.read()
-                            mime = _mime(f.name)
-                            context = {
-                                "mod_id": mid, "mod_desc": mod["description"],
-                                "elevation": mod["elevation"], "position": pos,
-                                "tower_type": tower_type, "photo_purpose": "modification",
-                            }
-                            with st.spinner(f"Generating caption for {f.name}…"):
-                                try:
-                                    caption = analyze_photo(fb, mime, context)
-                                except Exception as e:
-                                    caption = f"{mid} {pos} — {mod['description']}"
-                                    st.warning(f"Caption failed: {_friendly_ai_error(e)}")
-                            st.image(fb, caption=caption, width=280)
-                            photo_list.append((fb, caption, mime))
-                        photos[key] = photo_list
-                        st.session_state.photos = photos
-                    elif key in photos:
-                        st.success(f"✅  {len(photos[key])} photo(s) uploaded")
-        else:
-            key = (mid, "")
-            uploads = st.file_uploader(
-                f"Photos — {mid}",
-                type=["jpg", "jpeg", "png"],
-                accept_multiple_files=True,
-                key=f"photos_{mid}",
-            )
-            if uploads:
-                photo_list = []
-                for f in uploads:
-                    fb = f.read()
-                    mime = _mime(f.name)
                     context = {
                         "mod_id": mid, "mod_desc": mod["description"],
-                        "elevation": mod["elevation"], "position": "",
+                        "elevation": mod["elevation"], "position": pos,
                         "tower_type": tower_type, "photo_purpose": "modification",
+                        "fallback_caption": f"{mid} {pos} — {mod['description']}",
                     }
-                    with st.spinner(f"Generating caption for {f.name}…"):
-                        try:
-                            caption = analyze_photo(fb, mime, context)
-                        except Exception as e:
-                            caption = f"{mid} — {mod['description']}"
-                            st.warning(f"Caption failed: {_friendly_ai_error(e)}")
-                    st.image(fb, caption=caption, width=280)
-                    photo_list.append((fb, caption, mime))
-                photos[key] = photo_list
-                st.session_state.photos = photos
-            elif key in photos:
-                st.success(f"✅  {len(photos[key])} photo(s) uploaded")
+                    _photo_upload_section(
+                        f"photo_{mid}_{pos}", f"Photos — {mid} {pos}",
+                        photos.get(key, []), _make_photo_on_added(photos, key), context,
+                    )
+        else:
+            key = (mid, "")
+            context = {
+                "mod_id": mid, "mod_desc": mod["description"],
+                "elevation": mod["elevation"], "position": "",
+                "tower_type": tower_type, "photo_purpose": "modification",
+                "fallback_caption": f"{mid} — {mod['description']}",
+            }
+            _photo_upload_section(
+                f"photo_{mid}", f"Photos — {mid}",
+                photos.get(key, []), _make_photo_on_added(photos, key), context,
+            )
 
         st.markdown("---")
+
+    st.session_state.photos = photos
 
     # Special photo sections — differ by tower type
     st.markdown("### Additional Photo Sections")
     special_labels = get_special_photos(tower_type)
+    special_photos = st.session_state.special_photos
 
     for label in special_labels:
         st.markdown(f"##### {label}")
         purpose = GUYED_PHOTO_PURPOSES.get(label, "overall")
         slug = label.lower().replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "").replace("&", "")
-        uploads = st.file_uploader(
-            f"Upload photos — {label}",
-            type=["jpg", "jpeg", "png"],
-            accept_multiple_files=True,
-            key=f"photos_special_{slug}",
+        context = {
+            "photo_purpose": purpose, "tower_type": tower_type,
+            "fallback_caption": f"{label} — site photograph.",
+        }
+        _photo_upload_section(
+            f"photo_special_{slug}", f"Upload photos — {label}",
+            special_photos.get(label, []), _make_photo_on_added(special_photos, label), context,
         )
-        if uploads:
-            photo_list = []
-            for f in uploads:
-                fb = f.read()
-                mime = _mime(f.name)
-                context = {"photo_purpose": purpose, "tower_type": tower_type}
-                with st.spinner(f"Generating caption for {f.name}…"):
-                    try:
-                        caption = analyze_photo(fb, mime, context)
-                    except Exception as e:
-                        caption = f"{label} — site photograph."
-                        st.warning(f"Caption failed: {_friendly_ai_error(e)}")
-                st.image(fb, caption=caption, width=280)
-                photo_list.append((fb, caption, mime))
-            st.session_state.special_photos[label] = photo_list
-        elif label in st.session_state.special_photos:
-            st.success(f"✅  {len(st.session_state.special_photos[label])} photo(s) uploaded")
-
         st.markdown("---")
+
+    st.session_state.special_photos = special_photos
 
     if st.button("Next →", type="primary"):
         st.session_state.step = 5

@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 import PyPDF2
 from docx import Document
 
+from agents.retry import generate_content_with_retry
+
 load_dotenv()
 
 MODEL = "gemini-2.5-flash"
@@ -157,14 +159,16 @@ def extract_prefilled_report(file_bytes: bytes, filename: str) -> dict:
 
     if ext in (".docx", ".doc"):
         doc_text = _read_docx_text(file_bytes)
-        response = client.models.generate_content(
+        response = generate_content_with_retry(
+            client,
             model=MODEL,
             contents=f"{PREFILLED_REPORT_PROMPT}\n\nDocument text:\n{doc_text}",
         )
     elif ext == ".pdf":
         doc_text = _read_pdf_text(file_bytes)
         if doc_text:
-            response = client.models.generate_content(
+            response = generate_content_with_retry(
+                client,
                 model=MODEL,
                 contents=f"{PREFILLED_REPORT_PROMPT}\n\nDocument text:\n{doc_text}",
             )
@@ -179,8 +183,8 @@ def extract_prefilled_report(file_bytes: bytes, filename: str) -> dict:
                 pdf_doc.close()
                 from PIL import Image as PILImage
                 imgs = [PILImage.open(io.BytesIO(b)) for b in img_bytes_list[:4]]
-                response = client.models.generate_content(
-                    model=MODEL, contents=[PREFILLED_REPORT_PROMPT] + imgs
+                response = generate_content_with_retry(
+                    client, model=MODEL, contents=[PREFILLED_REPORT_PROMPT] + imgs
                 )
             except Exception:
                 return {"error": "Could not read PDF"}
@@ -202,24 +206,26 @@ def extract_document_fields(file_bytes: bytes, filename: str, doc_type: str) -> 
     if ext == ".pdf":
         doc_text = _read_pdf_text(file_bytes)
         if doc_text:
-            response = client.models.generate_content(
+            response = generate_content_with_retry(
+                client,
                 model=MODEL,
                 contents=f"{prompt}\n\nDocument text:\n{doc_text}",
             )
         else:
             img = Image.open(io.BytesIO(file_bytes))
-            response = client.models.generate_content(model=MODEL, contents=[prompt, img])
+            response = generate_content_with_retry(client, model=MODEL, contents=[prompt, img])
 
     elif ext in (".docx", ".doc"):
         doc_text = _read_docx_text(file_bytes)
-        response = client.models.generate_content(
+        response = generate_content_with_retry(
+            client,
             model=MODEL,
             contents=f"{prompt}\n\nDocument text:\n{doc_text}",
         )
 
     elif ext in (".jpg", ".jpeg", ".png"):
         img = Image.open(io.BytesIO(file_bytes))
-        response = client.models.generate_content(model=MODEL, contents=[prompt, img])
+        response = generate_content_with_retry(client, model=MODEL, contents=[prompt, img])
 
     else:
         return {"error": f"Unsupported file type: {ext}"}

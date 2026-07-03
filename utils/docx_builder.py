@@ -323,8 +323,9 @@ Return ONLY valid JSON (no markdown fences, no explanation):
 {sections_template}"""
 
     from google import genai
+    from agents.retry import generate_content_with_retry
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    response = generate_content_with_retry(client, model="gemini-2.5-flash", contents=prompt)
     text = response.text.strip()
     text = re.sub(r"^```json\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -570,7 +571,7 @@ def _add_photo_table(doc, photos: list):
         for cell in row.cells:
             _clear_cell_borders(cell)
 
-    for i, (img_bytes, caption, _) in enumerate(photos):
+    for i, (img_bytes, caption, _mime, *_rest) in enumerate(photos):
         row_idx = i // 2
         col_idx = i % 2
         cell = table.rows[row_idx].cells[col_idx]
@@ -682,6 +683,140 @@ def _strip_orphaned_images(docx_bytes: bytes) -> bytes:
             return out.getvalue()
     except Exception:
         return docx_bytes
+
+
+# ─── TABLE OF CONTENTS SYNC ───────────────────────────────────────────────────
+#
+# The template's TOC is a real Word field (`TOC \o "1-3" \h \z \u`) inside a
+# content-control (w:sdt). `updateFields=true` (set at the end of
+# build_report) makes desktop Word recompute it — with correct page numbers
+# — the instant the file is opened. But that recompute only happens in real
+# Word; anything that doesn't execute field updates (Google Docs import,
+# browser/quick-look previews, some PDF converters) just displays the
+# *cached* entries that were baked in when the master template was authored,
+# which have nothing to do with this report's actual generated sections.
+#
+# This rewrites those cached entries in place, before the file is handed
+# back for download, so the titles are correct everywhere — even before any
+# field update runs. Page numbers are left for Word to fill in live (we have
+# no layout engine here to compute real pagination), so entries are shown
+# without a fabricated number rather than a plausible-looking wrong one.
+
+_TOC_STYLE_BY_LEVEL = {1: "TOC1", 2: "TOC2", 3: "TOC2"}
+
+
+def _collect_headings_for_toc(doc) -> list:
+    """
+    Returns [(level, text), ...] for every Heading 1/2/3 paragraph in the
+    final document, in document order. Mirrors what the TOC field's own
+    `\\o "1-3"` switch would pick up on a real Word refresh.
+    """
+    headings = []
+    for p in doc.paragraphs:
+        style_name = p.style.name if p.style is not None else ""
+        if style_name in ("Heading 1", "Heading 2", "Heading 3"):
+            text = p.text.strip()
+            if text:
+                headings.append((int(style_name[-1]), text))
+    return headings
+
+
+def _rewrite_toc_entries(doc, headings: list):
+    """
+    Replaces the TOC field's cached entry paragraphs (style TOC1/TOC2/TOC3,
+    immediately following the "Table of Contents" TOCHeading paragraph) with
+    one paragraph per heading in `headings`. The outer field's begin /
+    instrText / separate runs (which live at the start of the *first* entry
+    paragraph) and its closing paragraph (which holds only the field's `end`
+    fldChar) are preserved untouched, so the field stays fully valid and
+    still self-corrects in real Word.
+
+    No-ops safely if the template's TOC structure doesn't match what's
+    expected here, rather than risking a corrupted document.
+    """
+    if not headings:
+        return
+
+    body = doc.element.body
+    # The TOC lives inside a content control (w:sdt > w:sdtContent), not as
+    # a direct child of the body, so this must walk all descendants — a
+    # plain findall(qn("w:p")) (direct children only) would silently miss
+    # it entirely.
+    all_paragraphs = list(body.iter(qn("w:p")))
+
+    def _style_of(p):
+        pPr = p.find(qn("w:pPr"))
+        if pPr is None:
+            return None
+        style = pPr.find(qn("w:pStyle"))
+        return style.get(qn("w:val")) if style is not None else None
+
+    def _has_fldchar_end(p):
+        return any(
+            fld.get(qn("w:fldCharType")) == "end"
+            for fld in p.iter(qn("w:fldChar"))
+        )
+
+    toc_head_idx = None
+    for i, p in enumerate(all_paragraphs):
+        if _style_of(p) == "TOCHeading":
+            toc_head_idx = i
+            break
+    if toc_head_idx is None:
+        return  # template has no TOC — nothing to sync
+
+    entry_start = toc_head_idx + 1
+    entry_end = entry_start
+    while (entry_end < len(all_paragraphs)
+           and _style_of(all_paragraphs[entry_end]) in ("TOC1", "TOC2", "TOC3")):
+        entry_end += 1
+
+    if entry_end >= len(all_paragraphs) or not _has_fldchar_end(all_paragraphs[entry_end]):
+        return  # structure isn't what we expect — leave it alone
+
+    old_entries = all_paragraphs[entry_start:entry_end]
+    if not old_entries:
+        return
+
+    # The outer field's begin/instrText/separate runs are the leading
+    # non-pPr, non-hyperlink children of the first entry paragraph.
+    first_entry = old_entries[0]
+    field_open_runs = []
+    for child in list(first_entry):
+        if child.tag == qn("w:pPr"):
+            continue
+        if child.tag == qn("w:hyperlink"):
+            break
+        field_open_runs.append(child)
+
+    def _build_entry_paragraph(level: int, text: str, include_field_open: bool):
+        p = OxmlElement("w:p")
+        pPr = OxmlElement("w:pPr")
+        style_el = OxmlElement("w:pStyle")
+        style_el.set(qn("w:val"), _TOC_STYLE_BY_LEVEL.get(level, "TOC1"))
+        pPr.append(style_el)
+        p.append(pPr)
+        if include_field_open:
+            for r in field_open_runs:
+                p.append(deepcopy(r))
+        run = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = text
+        run.append(t)
+        p.append(run)
+        return p
+
+    new_paragraphs = [
+        _build_entry_paragraph(level, text, include_field_open=(i == 0))
+        for i, (level, text) in enumerate(headings)
+    ]
+
+    insert_point = old_entries[0]
+    for new_p in new_paragraphs:
+        insert_point.addprevious(new_p)
+    for old_p in old_entries:
+        old_p.getparent().remove(old_p)
 
 
 # ─── MAIN BUILD FUNCTION ─────────────────────────────────────────────────────
@@ -888,6 +1023,11 @@ def build_report(data: dict) -> bytes:
         "Observations are limited to visible and accessible components only. "
         "No destructive testing or detailed structural analysis was performed."
     )
+
+    # ── 15. Table of Contents — sync cached entries to the real generated
+    # headings (see _rewrite_toc_entries docstring for why this is needed
+    # in addition to the updateFields flag below).
+    _rewrite_toc_entries(doc, _collect_headings_for_toc(doc))
 
     # Force Word to refresh fields (e.g. the Table of Contents) on open, so
     # newly appended headings show up without the user manually pressing F9.
