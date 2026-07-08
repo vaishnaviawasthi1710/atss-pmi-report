@@ -22,7 +22,7 @@ from utils.validators import (
 )
 from utils.docx_builder import build_report, generate_field_observations, OBS_SECTIONS_BY_TOWER
 from utils.gallery import (
-    sig, uploader_key, bump_uploader, new_uploads,
+    sig, sig_cache, uploader_key, bump_uploader, new_uploads,
     render_file_gallery, render_photo_gallery,
 )
 
@@ -516,6 +516,23 @@ def _friendly_ai_error(e: Exception) -> str:
     return f"{msg[:200]} (see server logs for the full traceback)"
 
 
+def _queue_warning(msg: str):
+    """
+    Upload processors call this instead of st.warning() directly when the
+    warning happens right before an st.rerun() in the same script run —
+    st.rerun() aborts the run immediately, so anything rendered just before
+    it (including a plain st.warning()) is discarded and never reaches the
+    browser. Queued warnings are flushed with _flush_warnings() on the next
+    run, after the rerun completes, so the user actually sees them.
+    """
+    st.session_state.setdefault("_pending_warnings", []).append(msg)
+
+
+def _flush_warnings():
+    for msg in st.session_state.pop("_pending_warnings", []):
+        st.warning(msg)
+
+
 # ── Upload gallery helpers ───────────────────────────────────────────────────
 # Factories (not bare closures inline in a loop) so each one binds its own
 # doc_key / dict_key at creation time — avoids the classic Python
@@ -531,7 +548,7 @@ def _make_doc_processor(doc_key: str):
                 st.session_state._doc_extractions[(doc_key, sig(f.name, fb))] = extracted
                 st.toast(f"Extracted from {f.name}", icon="✅")
             except Exception as e:
-                st.warning(f"Could not auto-extract from {f.name}: {_friendly_ai_error(e)}")
+                _queue_warning(f"Could not auto-extract from {f.name}: {_friendly_ai_error(e)}")
         return (fb, f.name, mime)
     return _process
 
@@ -626,7 +643,7 @@ def _doc_upload_section(doc_key: str, label: str, items: list, on_added):
         key=uploader_key(uid),
         accept_multiple_files=True,
     )
-    existing_sigs = {sig(fn, fb) for fb, fn, _m in items}
+    existing_sigs = sig_cache(uid)
     added = new_uploads(existing_sigs, uploaded, _make_doc_processor(doc_key))
     if added:
         on_added(added)
@@ -656,7 +673,7 @@ def _photo_upload_section(uid: str, label: str, items: list, on_added, context: 
         label, type=["jpg", "jpeg", "png"], accept_multiple_files=True,
         key=uploader_key(uid),
     )
-    existing_sigs = {sig(fn, fb) for fb, _cap, _m, fn, *_flag in items}
+    existing_sigs = sig_cache(uid)
 
     def _process(f, fb):
         fb, mime = _downscale_photo(fb, _mime(f.name))
@@ -667,7 +684,7 @@ def _photo_upload_section(uid: str, label: str, items: list, on_added, context: 
             except Exception as e:
                 caption = context.get("fallback_caption", "Site photograph.")
                 flag = ""
-                st.warning(f"AI analysis failed for {f.name}: {_friendly_ai_error(e)}")
+                _queue_warning(f"AI analysis failed for {f.name}: {_friendly_ai_error(e)}")
         return (fb, caption, mime, f.name, flag)
 
     added = new_uploads(existing_sigs, uploaded, _process)
@@ -894,6 +911,8 @@ def _card(content_fn, padding="1.4rem 1.6rem"):
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+_flush_warnings()
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 1 — Project Information
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1119,7 +1138,7 @@ elif st.session_state.step == 3:
                 accept_multiple_files=True, key=uploader_key(uid),
                 label_visibility="collapsed",
             )
-            existing_sigs = {sig(fn, fb) for fb, fn, _m in items}
+            existing_sigs = sig_cache(uid)
             added = new_uploads(existing_sigs, uploaded, _make_plain_file_processor())
             if added:
                 entry["files"] = items + added

@@ -66,6 +66,20 @@ def bump_uploader(uid: str):
     gens[uid] = gens.get(uid, 0) + 1
 
 
+def sig_cache(uid: str) -> set:
+    """
+    Persistent (across reruns) set of original-upload signatures for upload
+    slot `uid`. Must be used instead of recomputing signatures from the
+    stored items' bytes whenever a slot's process_fn transforms the bytes
+    before storing (e.g. photo downscaling) — recomputing from the stored
+    (transformed) bytes would produce a different length than the original
+    upload, so a genuine re-upload of the same file would no longer match
+    and would be silently reprocessed (extra AI calls) instead of deduped.
+    """
+    caches = st.session_state.setdefault("_upload_sig_caches", {})
+    return caches.setdefault(uid, set())
+
+
 @st.dialog("Preview", width="large")
 def _preview_file(fname: str, mime: str, fb: bytes, note: str = ""):
     st.markdown(f"**{html.escape(fname)}**")
