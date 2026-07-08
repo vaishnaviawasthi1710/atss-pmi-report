@@ -100,6 +100,61 @@ def check_missing_items(data: dict) -> dict:
     return missing
 
 
+def _cross_check_positions(doc_extractions: dict, reading_doc_key: str, doc_label: str) -> list:
+    """
+    Compares positions (Leg X / Guy N) mentioned in the As-Built Drawing's
+    extracted modifications against positions mentioned in `reading_doc_key`'s
+    extracted `readings` (each with a `guy_or_leg` field). Returns a list of
+    human-readable mismatch strings — v1 is a position-presence check, not
+    numeric tolerance validation. Returns [] if either document hasn't been
+    extracted yet, or if both agree.
+
+    doc_extractions: st.session_state._doc_extractions, i.e. {(doc_key, sig): extracted_dict}
+    """
+    as_built_positions = set()
+    reading_positions = set()
+
+    for (doc_key, _sig), extracted in doc_extractions.items():
+        if not isinstance(extracted, dict):
+            continue
+        if doc_key == "as_built_drawings":
+            for m in extracted.get("modifications") or []:
+                pos = (m.get("position") or "").strip()
+                if pos:
+                    as_built_positions.add(pos)
+        elif doc_key == reading_doc_key:
+            for r in extracted.get("readings") or []:
+                pos = (r.get("guy_or_leg") or "").strip()
+                if pos:
+                    reading_positions.add(pos)
+
+    if not as_built_positions or not reading_positions:
+        return []
+
+    mismatches = []
+    only_in_reading = reading_positions - as_built_positions
+    only_in_drawing = as_built_positions - reading_positions
+    if only_in_reading:
+        mismatches.append(
+            f"{doc_label} references {', '.join(sorted(only_in_reading))}, "
+            f"which the As-Built Drawing does not mention."
+        )
+    if only_in_drawing:
+        mismatches.append(
+            f"As-Built Drawing references {', '.join(sorted(only_in_drawing))} "
+            f"with no matching {doc_label} reading."
+        )
+    return mismatches
+
+
+def cross_check_plumb_twist(doc_extractions: dict) -> list:
+    return _cross_check_positions(doc_extractions, "plumb_twist_report", "Plumb & Twist Report")
+
+
+def cross_check_tension(doc_extractions: dict) -> list:
+    return _cross_check_positions(doc_extractions, "tension_report", "Tension Report")
+
+
 def _get_positions(tower_type: str, num_guys: int = 3) -> list:
     if tower_type == "Self Support":
         return ["Leg A", "Leg B", "Leg C"]

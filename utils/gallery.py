@@ -100,8 +100,10 @@ def _safe_image(fb: bytes, **kwargs):
 
 
 @st.dialog("Photo", width="large")
-def _preview_photo(fname: str, caption: str, fb: bytes):
+def _preview_photo(fname: str, caption: str, fb: bytes, flag: str = ""):
     _safe_image(fb, width="stretch")
+    if flag:
+        st.warning(f"⚠️ AI consistency flag: {flag}")
     if caption:
         st.caption(caption)
     st.download_button(
@@ -167,24 +169,47 @@ def render_file_gallery(items, on_delete, key_prefix, columns=3, extraction_note
                     st.rerun()
 
 
-def render_photo_gallery(items, on_delete, key_prefix, columns=4):
-    """items: list of (bytes, caption, mime, filename) tuples."""
+def render_photo_gallery(items, on_delete, key_prefix, on_edit=None, columns=4):
+    """
+    items: list of (bytes, caption, mime, filename, flag) tuples — flag is ""
+        unless the AI consistency check flagged this photo.
+    on_edit(idx, new_caption): optional — if given, the caption is rendered
+        as an editable field (engineer-owned caption) instead of read-only text.
+    """
     if not items:
         return
     cols = st.columns(columns)
-    for i, (fb, caption, mime, fname) in enumerate(items):
+    for i, item in enumerate(items):
+        fb, caption, mime, fname, *rest = item
+        flag = rest[0] if rest else ""
         with cols[i % columns]:
             with st.container(border=True):
                 _safe_image(fb, width="stretch")
-                short_cap = caption if len(caption) <= 70 else caption[:67] + "…"
-                st.markdown(
-                    f"<div style='font-size:0.71rem;color:#475569;margin:0.3rem 0 0.4rem;"
-                    f"line-height:1.3;min-height:2.6em;'>{html.escape(short_cap)}</div>",
-                    unsafe_allow_html=True,
-                )
+                if flag:
+                    st.markdown(
+                        f"<div style='font-size:0.68rem;font-weight:700;color:#92400e;"
+                        f"background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;"
+                        f"padding:0.25rem 0.4rem;margin:0.3rem 0;line-height:1.3;'>"
+                        f"⚠️ {html.escape(flag)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                if on_edit:
+                    new_caption = st.text_area(
+                        "Caption", value=caption, key=f"{key_prefix}_cap_{i}",
+                        height=68, label_visibility="collapsed",
+                    )
+                    if new_caption != caption:
+                        on_edit(i, new_caption)
+                else:
+                    short_cap = caption if len(caption) <= 70 else caption[:67] + "…"
+                    st.markdown(
+                        f"<div style='font-size:0.71rem;color:#475569;margin:0.3rem 0 0.4rem;"
+                        f"line-height:1.3;min-height:2.6em;'>{html.escape(short_cap)}</div>",
+                        unsafe_allow_html=True,
+                    )
                 bc1, bc2 = st.columns(2)
                 if bc1.button("👁", key=f"{key_prefix}_view_{i}", width="stretch", help="View full photo"):
-                    _preview_photo(fname, caption, fb)
+                    _preview_photo(fname, caption, fb, flag)
                 if bc2.button("🗑", key=f"{key_prefix}_del_{i}", width="stretch", help="Delete this photo"):
                     on_delete(i)
                     st.rerun()

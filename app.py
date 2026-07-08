@@ -14,10 +14,11 @@ try:
 except Exception:
     pass
 
-from agents.photo_agent import analyze_photo
 from agents.doc_agent import extract_document_fields, extract_prefilled_report
+from agents.photo_agent import analyze_photo
 from utils.validators import (
     check_missing_items, get_required_docs, get_special_photos,
+    cross_check_plumb_twist, cross_check_tension,
 )
 from utils.docx_builder import build_report, generate_field_observations, OBS_SECTIONS_BY_TOWER
 from utils.gallery import (
@@ -416,6 +417,7 @@ def _init():
         "modifications": [],
         "photos": {},
         "special_photos": {},
+        "extra_photos": [],  # [{"name": str, "photos": [(bytes, caption, mime, filename, flag), ...]}, ...]
         "documents": {},
         "extra_documents": [],  # [{"name": str, "files": [(bytes, filename, mime), ...]}, ...]
         "deficiencies": "",
@@ -426,6 +428,7 @@ def _init():
         "obs_generated": False,
         "obs_gen_error": None,
         "_doc_extractions": {},  # {(doc_key, sig): extracted_dict} — AI extraction results, shown in gallery previews
+        "_as_built_imported": set(),  # doc-extraction keys already imported into modifications
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -452,6 +455,37 @@ GUYED_PHOTO_PURPOSES = {
 def _mime(filename: str) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     return MIME_MAP.get(ext, "application/octet-stream")
+
+
+_MAX_PHOTO_DIM = 1600  # px, longest side
+
+
+def _downscale_photo(fb: bytes, mime: str) -> tuple:
+    """
+    Phone photos routinely come in at 10-20+ MB / 4000px+ on a side. Keeping
+    full-resolution originals in st.session_state for an entire wizard
+    session (across every mod/position/special/extra photo slot), plus
+    re-decoding them for every Gemini vision call, is what pushes a
+    photo-heavy session over Streamlit Community Cloud's ~1GB free-tier
+    memory limit and takes down the whole app ("Oh no. Error running app.").
+    The report only ever embeds photos at 2.9"x2.6" (utils/docx_builder.py),
+    so downscaling here is lossless for the actual output. Falls back to the
+    original bytes if the file can't be decoded as an image (caller's
+    st.image preview already has its own corrupt-file fallback).
+    """
+    try:
+        from PIL import Image, ImageOps
+        img = Image.open(io.BytesIO(fb))
+        img = ImageOps.exif_transpose(img)
+        if max(img.size) > _MAX_PHOTO_DIM:
+            img.thumbnail((_MAX_PHOTO_DIM, _MAX_PHOTO_DIM), Image.LANCZOS)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        return out.getvalue(), "image/jpeg"
+    except Exception:
+        return fb, mime
 
 
 def _tower_type() -> str:
@@ -491,14 +525,13 @@ def _friendly_ai_error(e: Exception) -> str:
 def _make_doc_processor(doc_key: str):
     def _process(f, fb):
         mime = _mime(f.name)
-        if doc_key not in ("as_built_drawings", "guy_tension_chart", "plumb_twist_report"):
-            with st.spinner(f"Extracting data from {f.name}…"):
-                try:
-                    extracted = extract_document_fields(fb, f.name, doc_key)
-                    st.session_state._doc_extractions[(doc_key, sig(f.name, fb))] = extracted
-                    st.toast(f"Extracted from {f.name}", icon="✅")
-                except Exception as e:
-                    st.warning(f"Could not auto-extract from {f.name}: {_friendly_ai_error(e)}")
+        with st.spinner(f"Extracting data from {f.name}…"):
+            try:
+                extracted = extract_document_fields(fb, f.name, doc_key)
+                st.session_state._doc_extractions[(doc_key, sig(f.name, fb))] = extracted
+                st.toast(f"Extracted from {f.name}", icon="✅")
+            except Exception as e:
+                st.warning(f"Could not auto-extract from {f.name}: {_friendly_ai_error(e)}")
         return (fb, f.name, mime)
     return _process
 
@@ -520,10 +553,62 @@ def _make_doc_extraction_note(doc_key: str, items: list):
     return _note
 
 
+def _as_built_import_section(items: list):
+    """
+    Shows modifications the AI extracted from uploaded As-Built Drawings and
+    lets the engineer import them into the Modifications list (Step 2) for
+    review/editing there — the as-built drawing is the source of truth, but
+    the engineer still confirms before anything is used in the report.
+    """
+    imported = st.session_state.setdefault("_as_built_imported", set())
+    for fb, fname, _mime in items:
+        key = ("as_built_drawings", sig(fname, fb))
+        if key in imported:
+            continue
+        extracted = st.session_state._doc_extractions.get(key)
+        found = (extracted or {}).get("modifications") or []
+        found = [m for m in found if isinstance(m, dict) and m.get("description")]
+        if not found:
+            continue
+        with st.container(border=True):
+            st.markdown(f"**Modifications found in `{fname}`**")
+            for m in found:
+                pos = (m.get("position") or "").strip()
+                st.caption(
+                    f"• {f'[{pos}] ' if pos else ''}{m['description']}"
+                    f" (elevation {m.get('elevation', 'n/a')})"
+                )
+            if st.button(f"➕ Add these {len(found)} to Modifications", key=f"import_asbuilt_{fname}"):
+                mods = st.session_state.modifications
+                start = len(mods)
+                for i, m in enumerate(found):
+                    pos = (m.get("position") or "").strip()
+                    desc = m["description"].strip()
+                    mods.append({
+                        "mod_id": f"M{start + i + 1}",
+                        "description": f"[{pos}] {desc}" if pos else desc,
+                        "elevation": m.get("elevation", ""),
+                    })
+                st.session_state.modifications = mods
+                st.session_state.obs_generated = False
+                imported.add(key)
+                st.success(f"Added {len(found)} modification(s) from {fname}. Review them on Step 2.")
+                st.rerun()
+
+
 def _make_list_delete(items: list):
     def _delete(idx):
         items.pop(idx)
     return _delete
+
+
+def _make_list_edit(items: list):
+    def _edit(idx, new_caption):
+        # Editing the caption is treated as the engineer reviewing/resolving
+        # any AI consistency flag on this photo, so it's cleared here.
+        fb, _old_caption, mime, fname, *_flag = items[idx]
+        items[idx] = (fb, new_caption, mime, fname, "")
+    return _edit
 
 
 def _doc_upload_section(doc_key: str, label: str, items: list, on_added):
@@ -559,24 +644,31 @@ def _doc_upload_section(doc_key: str, label: str, items: list, on_added):
 def _photo_upload_section(uid: str, label: str, items: list, on_added, context: dict):
     """
     Renders an "add photos" uploader + persistent thumbnail gallery for one
-    modification/position or special-photo slot. AI captioning only runs
-    on genuinely new files.
+    modification/position or special-photo slot. AI generates a caption for
+    each photo and — when it's tied to a specific modification — flags if
+    what's visible looks inconsistent with that modification's description
+    (e.g. a horizontal member uploaded against a "diagonal bracing" mod).
+    This is AI-suggests-only: the flag is a warning for the engineer to
+    review, never an auto-reject. Captions stay editable either way, and
+    editing a caption clears its flag (engineer has reviewed it).
     """
     uploaded = st.file_uploader(
         label, type=["jpg", "jpeg", "png"], accept_multiple_files=True,
         key=uploader_key(uid),
     )
-    existing_sigs = {sig(fn, fb) for fb, _cap, _m, fn in items}
+    existing_sigs = {sig(fn, fb) for fb, _cap, _m, fn, *_flag in items}
 
     def _process(f, fb):
-        mime = _mime(f.name)
-        with st.spinner(f"Generating caption for {f.name}…"):
+        fb, mime = _downscale_photo(fb, _mime(f.name))
+        with st.spinner(f"Analyzing {f.name}…"):
             try:
-                caption = analyze_photo(fb, mime, context)
+                result = analyze_photo(fb, mime, context)
+                caption, flag = result["caption"], result["flag"]
             except Exception as e:
                 caption = context.get("fallback_caption", "Site photograph.")
-                st.warning(f"Caption failed for {f.name}: {_friendly_ai_error(e)}")
-        return (fb, caption, mime, f.name)
+                flag = ""
+                st.warning(f"AI analysis failed for {f.name}: {_friendly_ai_error(e)}")
+        return (fb, caption, mime, f.name, flag)
 
     added = new_uploads(existing_sigs, uploaded, _process)
     if added:
@@ -584,7 +676,10 @@ def _photo_upload_section(uid: str, label: str, items: list, on_added, context: 
         bump_uploader(uid)
         st.rerun()
 
-    render_photo_gallery(items, on_delete=_make_list_delete(items), key_prefix=f"gal_{uid}")
+    render_photo_gallery(
+        items, on_delete=_make_list_delete(items), key_prefix=f"gal_{uid}",
+        on_edit=_make_list_edit(items),
+    )
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -995,6 +1090,8 @@ elif st.session_state.step == 3:
             st.session_state.documents = docs
 
         _doc_upload_section(doc_key, doc_label, items, _on_added)
+        if doc_key == "as_built_drawings":
+            _as_built_import_section(items)
         st.markdown("---")
 
     st.markdown("##### Certificates & Additional Documents")
@@ -1132,6 +1229,49 @@ elif st.session_state.step == 4:
 
     st.session_state.special_photos = special_photos
 
+    # Extra Photos — user-named, not a fixed special-photo slot. Mirrors the
+    # "Certificates & Additional Documents" pattern on Step 3: the engineer
+    # names the section, uploads photos, and it's auto-added to the report's
+    # Photo Documentation table and given its own photo group heading.
+    st.markdown("### Extra Photos")
+    st.caption(
+        "Add any additional photo group with its own name (e.g. \"Drone Overview\", "
+        "\"Site Access Conditions\"). Each one gets its own heading in the report and "
+        "its own row in the Photo Documentation table."
+    )
+
+    extra_photos = st.session_state.extra_photos
+
+    for i, entry in enumerate(extra_photos):
+        cols = st.columns([4, 1])
+        with cols[0]:
+            entry["name"] = st.text_input(
+                "Section name", value=entry.get("name", ""),
+                placeholder="e.g. Drone Overview",
+                key=f"extraphoto_name_{i}",
+            )
+        with cols[1]:
+            if st.button("🗑️ Remove", key=f"extraphoto_del_{i}"):
+                extra_photos.pop(i)
+                st.rerun()
+
+        entry_photos = entry.setdefault("photos", [])
+        context = {
+            "photo_purpose": "overall", "tower_type": tower_type,
+            "fallback_caption": f"{entry.get('name') or 'Extra photo'} — site photograph.",
+        }
+        _photo_upload_section(
+            f"extraphoto_{i}", f"Upload photos — {entry.get('name') or f'Section {i + 1}'}",
+            entry_photos, _make_photo_on_added(entry, "photos"), context,
+        )
+        st.markdown("---")
+
+    if st.button("+ Add extra photo section"):
+        extra_photos.append({"name": "", "photos": []})
+        st.rerun()
+
+    st.session_state.extra_photos = extra_photos
+
     if st.button("Next →", type="primary"):
         st.session_state.step = 5
         st.rerun()
@@ -1265,6 +1405,26 @@ elif st.session_state.step == 5:
             unsafe_allow_html=True,
         )
 
+    # ── Plumb & Twist / Tension vs. As-Built cross-check (Guyed only) ─────────
+    if tower_type == "Guyed":
+        mismatches = (
+            cross_check_plumb_twist(st.session_state._doc_extractions)
+            + cross_check_tension(st.session_state._doc_extractions)
+        )
+        if mismatches:
+            items_html = "".join(
+                f'<div style="margin-top:0.3rem;font-size:0.83rem;color:#78350f;">• {m}</div>'
+                for m in mismatches
+            )
+            st.markdown(
+                f'<div style="background:#fffbeb;border:1.5px solid #f59e0b;border-radius:10px;'
+                f'padding:1rem 1.4rem;margin:0.5rem 0 1rem 0;">'
+                f'<div style="font-weight:700;color:#92400e;font-size:0.95rem;">'
+                f'⚠️ &nbsp;Guy Report / As-Built Position Mismatch</div>'
+                f'{items_html}</div>',
+                unsafe_allow_html=True,
+            )
+
     st.markdown("---")
 
     # ── Field Observation Details — AI generated + editable ──────────────────
@@ -1359,6 +1519,10 @@ elif st.session_state.step == 5:
                     "modifications":      mods,
                     "photos":             st.session_state.photos,
                     "special_photos":     st.session_state.special_photos,
+                    "extra_photos":       [
+                        (e["name"], e["photos"]) for e in st.session_state.extra_photos
+                        if e.get("name", "").strip() and e.get("photos")
+                    ],
                     "documents":          st.session_state.documents,
                     "extra_documents":    [
                         (e["name"], e["files"]) for e in st.session_state.extra_documents

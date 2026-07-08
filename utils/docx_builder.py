@@ -204,6 +204,12 @@ def _replace_cover_address(doc, site_address: str, gps: str):
         return
 
     address_lines = [l for l in site_address.split("\n") if l.strip()]
+    if len(address_lines) == 1 and "," in address_lines[0]:
+        # No explicit line break typed (e.g. AI-extracted address arrives as
+        # one string) — split on the first comma so street address and
+        # city/state/zip still land on their own template lines.
+        street, rest = address_lines[0].split(",", 1)
+        address_lines = [street.strip(), rest.strip(" ,")]
     _replace_para_value_after_label(paras[addr_idx], "Site Address:", address_lines[0] if address_lines else "")
 
     for offset, line in enumerate([
@@ -361,7 +367,13 @@ def _replace_field_observations(doc, observations: dict):
                 stripped = text.strip()
                 if stripped:
                     bullet_tmpl = deepcopy(p)
-            if "Observed Deficiencies" in text:
+            # Exact-match the heading paragraph itself — a loose substring
+            # check on "Observed Deficiencies" also matches the template's
+            # own "Final Verification" boilerplate bullet ("...except as
+            # noted in the Observed Deficiencies section."), which stops the
+            # removal range one paragraph early and leaks that bullet through
+            # alongside the AI-generated ones.
+            if text.strip() in ("Observed Deficiencies", "Observed Deficiencies:"):
                 obs_def_idx = i
                 break
 
@@ -486,6 +498,31 @@ def _pdf_to_images(pdf_bytes: bytes) -> list:
 
 # ─── PHOTO SIZE CONSTRAINT ────────────────────────────────────────────────────
 
+def _ensure_portrait(img_bytes: bytes) -> bytes:
+    """
+    Normalizes camera EXIF orientation, then rotates any still-landscape
+    photo 90° so every photo in the report displays portrait — customer
+    photo pools mix landscape and portrait shots, which looked inconsistent
+    in the photo grid.
+    """
+    try:
+        from PIL import Image as PILImage, ImageOps
+        img = PILImage.open(io.BytesIO(img_bytes))
+        fmt = (img.format or "JPEG").upper()
+        if fmt not in ("JPEG", "PNG"):
+            fmt = "JPEG"
+        img = ImageOps.exif_transpose(img)
+        if img.width > img.height:
+            img = img.rotate(-90, expand=True)
+        if fmt == "JPEG" and img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format=fmt)
+        return buf.getvalue()
+    except Exception:
+        return img_bytes
+
+
 def _constrained_picture_dims(img_bytes: bytes, max_w: float = 2.9, max_h: float = 2.6) -> tuple:
     """
     Returns (width_inches, height_inches) that fits the image within max_w × max_h
@@ -558,8 +595,9 @@ def _clear_cell_borders(cell):
 def _add_photo_table(doc, photos: list):
     """
     Add photos in a 2-column borderless table, 2 per row (4 per page).
-    Each photo is size-constrained so portrait and landscape both fit within
-    a 2.9" × 2.6" box, guaranteeing two rows per page.
+    Every photo is rotated to portrait (see _ensure_portrait) and then
+    size-constrained to fit within a 2.9" × 2.6" box, guaranteeing two rows
+    per page.
     """
     if not photos:
         return
@@ -572,6 +610,7 @@ def _add_photo_table(doc, photos: list):
             _clear_cell_borders(cell)
 
     for i, (img_bytes, caption, _mime, *_rest) in enumerate(photos):
+        img_bytes = _ensure_portrait(img_bytes)
         row_idx = i // 2
         col_idx = i % 2
         cell = table.rows[row_idx].cells[col_idx]
@@ -819,6 +858,31 @@ def _rewrite_toc_entries(doc, headings: list):
         old_p.getparent().remove(old_p)
 
 
+# Local names of the CT_Settings elements that the OOXML schema requires to
+# come AFTER w:updateFields. Word's settings.xml parser is order-sensitive —
+# inserting updateFields at position 0 (before e.g. w:zoom) is invalid and
+# can make Word treat the part as needing repair, silently dropping the
+# setting so the TOC never actually auto-refreshes on open.
+_SETTINGS_AFTER_UPDATE_FIELDS = (
+    "hdrShapeDefaults", "footnotePr", "endnotePr", "compat", "rsids", "mathPr",
+    "themeFontLang", "clrSchemeMapping", "doNotAutoCompressPictures",
+    "shapeDefaults", "decimalSymbol", "listSeparator", "docId",
+    "defaultImageDpi", "discardImageEditingData", "conflictMode",
+    "chartTrackingRefBased",
+)
+
+
+def _insert_update_fields(settings_el):
+    """Sets updateFields=true at a schema-valid position in settings.xml (see above)."""
+    update_fields = OxmlElement("w:updateFields")
+    update_fields.set(qn("w:val"), "true")
+    for child in settings_el:
+        if child.tag.split("}")[-1] in _SETTINGS_AFTER_UPDATE_FIELDS:
+            child.addprevious(update_fields)
+            return
+    settings_el.append(update_fields)
+
+
 # ─── MAIN BUILD FUNCTION ─────────────────────────────────────────────────────
 
 def build_report(data: dict) -> bytes:
@@ -835,6 +899,7 @@ def build_report(data: dict) -> bytes:
     num_guys       = data.get("num_guys", 3)
     photos         = data.get("photos", {})
     special_photos = data.get("special_photos", {})
+    extra_photos   = data.get("extra_photos", [])
     documents      = data.get("documents", {})
     extra_documents = data.get("extra_documents", [])
     deficiencies   = data.get("deficiencies", "")
@@ -915,6 +980,11 @@ def build_report(data: dict) -> bytes:
         photo_rows.append([str(counter), label, ""])
         counter += 1
 
+    for entry_name, photo_list in extra_photos:
+        if entry_name and photo_list:
+            photo_rows.append([str(counter), entry_name, ""])
+            counter += 1
+
     _rebuild_table(doc, ("Photo No.", "Description"), photo_rows)
 
     # ── 7. Deficiencies ──────────────────────────────────────────────────────
@@ -970,6 +1040,12 @@ def build_report(data: dict) -> bytes:
         if photo_list:
             _start_group()
             _add_photo_group_heading(doc, f"{label}:")
+            _add_photo_table(doc, photo_list)
+
+    for entry_name, photo_list in extra_photos:
+        if entry_name and photo_list:
+            _start_group()
+            _add_photo_group_heading(doc, f"{entry_name}:")
             _add_photo_table(doc, photo_list)
 
     # ── 12. Supporting documents — tower-type-specific fixed checklist ───────
@@ -1031,10 +1107,7 @@ def build_report(data: dict) -> bytes:
 
     # Force Word to refresh fields (e.g. the Table of Contents) on open, so
     # newly appended headings show up without the user manually pressing F9.
-    settings_el = doc.settings.element
-    update_fields = OxmlElement("w:updateFields")
-    update_fields.set(qn("w:val"), "true")
-    settings_el.insert(0, update_fields)
+    _insert_update_fields(doc.settings.element)
 
     buf = io.BytesIO()
     doc.save(buf)

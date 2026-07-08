@@ -72,6 +72,51 @@ Return only the JSON, no other text.""",
   "remarks": ""
 }
 Return only the JSON, no other text.""",
+
+    "as_built_drawings": """Extract the following fields from this As-Built Drawing (Engineer of Record) and return as JSON:
+{
+  "drawing_number": "",
+  "drawing_date": "",
+  "site_name": "",
+  "site_number": "",
+  "tower_height": "",
+  "modifications": [
+    {"mod_id": "M1", "description": "", "elevation": "", "position": ""}
+  ],
+  "remarks": ""
+}
+Rules:
+- "modifications" must list every structural modification shown on the drawing, in the order they appear.
+- "position" is the specific level the modification occurs at — e.g. "Leg A", "Leg B", "Leg C", "Guy 1", "Guy 2", etc. Leave empty if the drawing doesn't tie the item to a specific leg/guy.
+- "elevation" should be the elevation or elevation range shown for that item (e.g. "200.0'-180.0'").
+- If a field is not found, leave it as empty string / empty list. Return only the JSON, no other text.""",
+
+    "plumb_twist_report": """Extract the following fields from this Plumb & Twist Report and return as JSON:
+{
+  "report_date": "",
+  "readings": [
+    {"guy_or_leg": "", "elevation": "", "plumb_measured": "", "plumb_allowable": "",
+     "twist_measured": "", "twist_allowable": "", "pass_fail": ""}
+  ],
+  "remarks": ""
+}
+Rules:
+- "guy_or_leg" is the position each reading was taken at — e.g. "Guy 1", "Leg A".
+- "pass_fail" should be "Pass", "Fail", or "" if not stated.
+- If a field is not found, leave it as empty string / empty list. Return only the JSON, no other text.""",
+
+    "tension_report": """Extract the following fields from this Guy Wire Tension Report and return as JSON:
+{
+  "report_date": "",
+  "readings": [
+    {"guy_or_leg": "", "elevation": "", "tension_measured": "", "tension_required": "", "pass_fail": ""}
+  ],
+  "remarks": ""
+}
+Rules:
+- "guy_or_leg" is the position each reading was taken at — e.g. "Guy 1".
+- "pass_fail" should be "Pass", "Fail", or "" if not stated.
+- If a field is not found, leave it as empty string / empty list. Return only the JSON, no other text.""",
 }
 
 
@@ -177,12 +222,14 @@ def extract_prefilled_report(file_bytes: bytes, filename: str) -> dict:
                 import fitz
                 pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
                 img_bytes_list = []
-                for page in pdf_doc:
+                for i, page in enumerate(pdf_doc):
+                    if i >= 4:
+                        break
                     pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
                     img_bytes_list.append(pix.tobytes("png"))
                 pdf_doc.close()
                 from PIL import Image as PILImage
-                imgs = [PILImage.open(io.BytesIO(b)) for b in img_bytes_list[:4]]
+                imgs = [PILImage.open(io.BytesIO(b)) for b in img_bytes_list]
                 response = generate_content_with_retry(
                     client, model=MODEL, contents=[PREFILLED_REPORT_PROMPT] + imgs
                 )
@@ -212,8 +259,18 @@ def extract_document_fields(file_bytes: bytes, filename: str, doc_type: str) -> 
                 contents=f"{prompt}\n\nDocument text:\n{doc_text}",
             )
         else:
-            img = Image.open(io.BytesIO(file_bytes))
-            response = generate_content_with_retry(client, model=MODEL, contents=[prompt, img])
+            # Scanned/image-only PDF (common for as-built drawings) — no text
+            # layer to read, so render pages to images for Gemini vision instead.
+            import fitz
+            pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+            imgs = []
+            for i, page in enumerate(pdf_doc):
+                if i >= 4:
+                    break
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                imgs.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+            pdf_doc.close()
+            response = generate_content_with_retry(client, model=MODEL, contents=[prompt] + imgs)
 
     elif ext in (".docx", ".doc"):
         doc_text = _read_docx_text(file_bytes)
